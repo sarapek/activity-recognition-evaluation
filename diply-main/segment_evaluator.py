@@ -1,5 +1,5 @@
 import numpy as np
-from sklearn.metrics import roc_curve, auc, f1_score, confusion_matrix
+from sklearn.metrics import roc_curve, auc, f1_score
 from datetime import datetime
 import pandas as pd
 from typing import List, Tuple, Dict
@@ -202,9 +202,7 @@ class SegmentEvaluator:
         time_errors = {
             'start_errors': [],
             'end_errors': [],
-            'duration_errors': [],
-            'detection_delays': [],  # How late was the detection (only positive)
-            'detection_early': []    # How early was the detection (only positive)
+            'duration_errors': []
         }
         
         matched_pairs = []
@@ -231,16 +229,14 @@ class SegmentEvaluator:
                 if best_match in unmatched_ground_truth:
                     unmatched_ground_truth.remove(best_match)
                 
-                # Calculate errors
-                start_diff = (pred['start_time'] - best_match['start_time']).total_seconds()
-                start_error = abs(start_diff)
+                # Calculate errors (absolute values)
+                start_error = abs((pred['start_time'] - best_match['start_time']).total_seconds())
                 end_error = abs((pred['end_time'] - best_match['end_time']).total_seconds())
                 duration_error = abs(pred['duration'] - best_match['duration'])
                 
                 time_errors['start_errors'].append(start_error)
                 time_errors['end_errors'].append(end_error)
                 time_errors['duration_errors'].append(duration_error)
-                time_errors['detection_delays'].append(max(0, start_diff))  # Only positive delays
             else:
                 unmatched_predictions.append(pred)
         
@@ -258,98 +254,114 @@ class SegmentEvaluator:
                 results[f'{key}_max'] = None
                 results[f'{key}_median'] = None
         
-        results['num_matched'] = len(matched_pairs)
-        results['num_predicted'] = len(predicted_segments)
-        results['num_ground_truth'] = len(ground_truth_segments)
-        results['num_missed'] = len(unmatched_ground_truth)
-        results['num_false_alarms'] = len(unmatched_predictions)
-        
         return results
        
     def calculate_segment_metrics(self,
                                   predicted_segments: List[Dict],
                                   ground_truth_segments: List[Dict],
                                   confidence_scores: List[float] = None) -> Dict:
-        """Calculate ROC, AUC, F1 and other metrics for segment detection"""
+        """
+        Calculate segment-based detection metrics including F1, precision, recall, TPR, FPR.
+        Also calculates ROC and AUC if confidence scores are provided.
+        """
         
-        # Create binary labels for each time window
-        # We'll discretize time into windows and mark presence/absence
-        all_times = []
-        for seg in predicted_segments + ground_truth_segments:
-            all_times.extend([seg['start_time'], seg['end_time']])
+        # Match segments and count TP, FP, FN
+        matched_gt = set()
+        matched_pred = set()
         
-        if not all_times:
-            return {
-                'f1_score': 0.0,
-                'precision': 0.0,
-                'recall': 0.0,
-                'auc': None,
-                'true_positives': 0,
-                'false_positives': 0,
-                'false_negatives': 0,
-                'true_negatives': 0
-            }
+        true_positives = 0
+        false_positives = 0
         
-        min_time = min(all_times)
-        max_time = max(all_times)
-        
-        # Create time windows (1 second intervals)
-        time_range = (max_time - min_time).total_seconds()
-        num_windows = int(time_range) + 1
-        
-        y_true = np.zeros(num_windows)
-        y_pred = np.zeros(num_windows)
-        y_scores = np.zeros(num_windows)
-        
-        # Mark ground truth segments
-        for seg in ground_truth_segments:
-            start_idx = int((seg['start_time'] - min_time).total_seconds())
-            end_idx = int((seg['end_time'] - min_time).total_seconds())
-            y_true[start_idx:end_idx+1] = 1
-        
-        # Mark predicted segments
-        for i, seg in enumerate(predicted_segments):
-            start_idx = int((seg['start_time'] - min_time).total_seconds())
-            end_idx = int((seg['end_time'] - min_time).total_seconds())
-            y_pred[start_idx:end_idx+1] = 1
+        # Match predicted segments to ground truth
+        for i, pred in enumerate(predicted_segments):
+            best_match = None
+            best_match_idx = None
             
-            # Use confidence scores if provided
-            if confidence_scores and i < len(confidence_scores):
-                y_scores[start_idx:end_idx+1] = confidence_scores[i]
+            for j, gt in enumerate(ground_truth_segments):
+                if j in matched_gt:
+                    continue
+                    
+                # Check if same segment ID
+                if pred.get('segment_id') == gt.get('segment_id'):
+                    # Calculate start time difference
+                    start_diff = (pred['start_time'] - gt['start_time']).total_seconds()
+                    
+                    # Allow prediction within start_threshold
+                    if abs(start_diff) <= self.start_threshold:
+                        best_match = gt
+                        best_match_idx = j
+                        break
+            
+            if best_match is not None:
+                true_positives += 1
+                matched_gt.add(best_match_idx)
+                matched_pred.add(i)
             else:
-                y_scores[start_idx:end_idx+1] = 1.0
+                false_positives += 1
+        
+        # Count false negatives (ground truth segments not matched)
+        false_negatives = len(ground_truth_segments) - len(matched_gt)
+        
+        # True negatives: For segment-based evaluation, this would be segment IDs
+        # that appear in neither prediction nor ground truth
+        # For simplicity, we'll calculate it from the expected segment IDs (1-8)
+        all_segment_ids = set([str(i) for i in range(1, 9)])
+        pred_segment_ids = set([s['segment_id'] for s in predicted_segments])
+        gt_segment_ids = set([s['segment_id'] for s in ground_truth_segments])
+        
+        # TN = segment IDs with no activity in both GT and predictions
+        true_negatives = len(all_segment_ids - pred_segment_ids - gt_segment_ids)
         
         # Calculate metrics
-        tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
+        precision = true_positives / (true_positives + false_positives) if (true_positives + false_positives) > 0 else 0.0
+        recall = true_positives / (true_positives + false_negatives) if (true_positives + false_negatives) > 0 else 0.0
         
-        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-        f1 = f1_score(y_true, y_pred, zero_division=0)
-        
-        # Only calculate AUC if there are varied confidence scores
-        if len(np.unique(y_scores[y_pred == 1])) > 1:
-            try:
-                fpr, tpr, thresholds = roc_curve(y_true, y_scores)
-                roc_auc = auc(fpr, tpr)
-            except:
-                fpr, tpr = None, None
-                roc_auc = None
+        if precision + recall > 0:
+            f1 = 2 * (precision * recall) / (precision + recall)
         else:
-            roc_auc = None
-            fpr, tpr = None, None
+            f1 = 0.0
         
-        return {
+        # TPR (True Positive Rate) = Recall = Sensitivity
+        tpr = recall
+        
+        # FPR (False Positive Rate) = FP / (FP + TN)
+        fpr = false_positives / (false_positives + true_negatives) if (false_positives + true_negatives) > 0 else 0.0
+        
+        results = {
             'f1_score': f1,
             'precision': precision,
             'recall': recall,
-            'auc': roc_auc,
-            'true_positives': int(tp),
-            'false_positives': int(fp),
-            'false_negatives': int(fn),
-            'true_negatives': int(tn),
+            'tpr': tpr,
             'fpr': fpr,
-            'tpr': tpr
+            'true_positives': true_positives,
+            'false_positives': false_positives,
+            'false_negatives': false_negatives,
+            'true_negatives': true_negatives,
         }
+        
+        # Calculate ROC and AUC only if confidence scores are provided
+        if confidence_scores is not None and len(confidence_scores) > 0:
+            # Only calculate if we have varied confidence scores
+            if len(np.unique(confidence_scores)) > 1:
+                try:
+                    # Create binary labels for each prediction
+                    y_true = np.array([1 if i in matched_pred else 0 for i in range(len(predicted_segments))])
+                    y_scores = np.array(confidence_scores[:len(predicted_segments)])
+                    
+                    # Calculate ROC curve and AUC
+                    fpr_curve, tpr_curve, thresholds = roc_curve(y_true, y_scores)
+                    roc_auc = auc(fpr_curve, tpr_curve)
+                    
+                    results['auc'] = roc_auc
+                except Exception as e:
+                    print(f"Warning: Could not calculate ROC/AUC: {e}")
+                    results['auc'] = None
+            else:
+                results['auc'] = None
+        else:
+            results['auc'] = None
+        
+        return results
     
     def evaluate(self,
                 predicted_file: str,
@@ -437,21 +449,22 @@ class SegmentEvaluator:
         print(f"Start Time Threshold: {self.start_threshold}s")
         print(f"Accuracy Tolerance:   {self.time_tolerance}s")
         
-        print("\n--- Detection Metrics ---")
+        print("\n--- Detection Metrics (Segment-Based) ---")
         print(f"F1 Score:         {results['f1_score']:.4f}")
         print(f"Precision:        {results['precision']:.4f}")
-        print(f"Recall:           {results['recall']:.4f}")
-        auc_val = results['auc']
+        print(f"Recall (TPR):     {results['recall']:.4f}")
+        print(f"FPR:              {results['fpr']:.4f}")
+        auc_val = results.get('auc')
         if auc_val is not None:
             print(f"AUC:              {auc_val:.4f}")
         else:
-            print(f"AUC:              N/A (no confidence scores)")
+            print(f"AUC:              N/A (no varied confidence scores)")
         
-        print("\n--- Confusion Matrix ---")
-        print(f"True Positives:   {results['true_positives']}")
-        print(f"False Positives:  {results['false_positives']}")
-        print(f"False Negatives:  {results['false_negatives']}")
-        print(f"True Negatives:   {results['true_negatives']}")
+        print("\n--- Confusion Matrix (Segments) ---")
+        print(f"True Positives:   {results['true_positives']} segments")
+        print(f"False Positives:  {results['false_positives']} segments")
+        print(f"False Negatives:  {results['false_negatives']} segments")
+        print(f"True Negatives:   {results['true_negatives']} segment IDs")
         
         print("\n--- Temporal Accuracy ---")
         if results['start_errors_mean'] is not None:
@@ -461,17 +474,15 @@ class SegmentEvaluator:
             print(f"End Time Error (mean):       {results['end_errors_mean']:.4f}s")
             print(f"End Time Error (std):        {results['end_errors_std']:.4f}s")
             print(f"Duration Error (mean):       {results['duration_errors_mean']:.4f}s")
-            print(f"Detection Delay (mean):      {results['detection_delays_mean']:.4f}s")
-            print(f"Detection Delay (max):       {results['detection_delays_max']:.4f}s")
         else:
             print("No matched segments for temporal analysis")
         
         print("\n--- Segment Counts ---")
-        print(f"Predicted Segments:     {results['num_predicted']}")
-        print(f"Ground Truth Segments:  {results['num_ground_truth']}")
-        print(f"Matched Segments:       {results['num_matched']}")
-        print(f"Missed (Too Late):      {results['num_missed']}")
-        print(f"False Alarms:           {results['num_false_alarms']}")
+        print(f"Predicted Segments:     {results['true_positives'] + results['false_positives']}")
+        print(f"Ground Truth Segments:  {results['true_positives'] + results['false_negatives']}")
+        print(f"Matched Segments:       {results['true_positives']}")
+        print(f"Missed Segments:        {results['false_negatives']}")
+        print(f"False Alarm Segments:   {results['false_positives']}")
         
         if 'per_segment_metrics' in results and show_per_segment:
             print("\n" + "=" * 60)
@@ -481,8 +492,8 @@ class SegmentEvaluator:
             per_seg = results['per_segment_metrics']
             for seg_id, metrics in sorted(per_seg.items()):
                 print(f"\n--- Segment ID: {seg_id} ---")
-                print(f"  Predicted:     {metrics['num_predicted']}")
-                print(f"  Ground Truth:  {metrics['num_ground_truth']}")
+                print(f"  Predicted:     {metrics['true_positives'] + metrics['false_positives']}")
+                print(f"  Ground Truth:  {metrics['true_positives'] + metrics['false_negatives']}")
                 print(f"  Status:        ", end="")
                 
                 if metrics['detected']:
@@ -514,34 +525,32 @@ class SegmentEvaluator:
 if __name__ == "__main__":
     
     # Initialize evaluator with thresholds
-    # start_time_threshold_seconds: maximum delay for detection (15s)
-    # time_tolerance_seconds: threshold for "accurate" timing (2s)
     evaluator = SegmentEvaluator(
         time_tolerance_seconds=2.0,
         start_time_threshold_seconds=15.0
     )
     
-    # Example 1: Sanity check with randomly modified file
-    print("SANITY CHECK EVALUATION")
-    results_sanity = evaluator.evaluate(
+    # Example 1: Evaluation without confidence scores
+    print("EVALUATION WITHOUT CONFIDENCE SCORES")
+    results = evaluator.evaluate(
         predicted_file='data_modified.txt',
         ground_truth_file='data_original.txt',
         per_segment=True
     )
-    evaluator.print_report(results_sanity)
+    evaluator.print_report(results)
     
     print("\n\n")
     
-    # Example 2: SVM-based recognition with confidence scores
-    print("SVM RECOGNITION EVALUATION")
+    # Example 2: Evaluation with confidence scores
+    print("EVALUATION WITH CONFIDENCE SCORES")
     
-    # These would come from your SVM classifier
-    svm_confidence_scores = [0.95, 0.87, 0.92, 0.78, 0.88]
+    # Confidence scores for each predicted segment
+    confidence_scores = [0.95, 0.87, 0.92, 0.78, 0.88, 0.91, 0.85, 0.93]
     
-    results_svm = evaluator.evaluate(
+    results_with_conf = evaluator.evaluate(
         predicted_file='svm_predictions.txt',
         ground_truth_file='data_original.txt',
-        confidence_scores=svm_confidence_scores,
+        confidence_scores=confidence_scores,
         per_segment=True
     )
-    evaluator.print_report(results_svm)
+    evaluator.print_report(results_with_conf)

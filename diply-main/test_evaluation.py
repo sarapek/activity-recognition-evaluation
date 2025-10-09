@@ -28,7 +28,7 @@ def convert_to_json_serializable(obj):
         return str(obj)
 
 def run_single_test(evaluator, predicted_file, ground_truth_file, variant_name, 
-                    output_file=None, per_segment=False):
+                    output_file=None, per_segment=False, timeline_visualisation=False):
     """Run evaluation on a single variant"""
     header = f"\n{'='*70}\nTesting: {variant_name.upper()}\n{'='*70}\n"
     
@@ -49,11 +49,19 @@ def run_single_test(evaluator, predicted_file, ground_truth_file, variant_name,
         if output_file:
             write_report_to_file(results, output_file, show_per_segment=per_segment)
 
-        # --- Visualize segments ---
-        # Extract segments for visualization
-        pred_segments = evaluator.extract_segments(evaluator.parse_log_file(predicted_file))
-        gt_segments = evaluator.extract_segments(evaluator.parse_log_file(ground_truth_file))
+    except Exception as e:
+        error_msg = f"ERROR: {str(e)}\n"
+        print(error_msg)
+        if output_file:
+            output_file.write(error_msg)
+        return None
+    
+    # --- Visualize segments (separate try/catch so it doesn't break results) ---
+    if timeline_visualisation:
         try:
+            pred_segments = evaluator.extract_segments(evaluator.parse_log_file(predicted_file))
+            gt_segments = evaluator.extract_segments(evaluator.parse_log_file(ground_truth_file))
+            
             fig, axes = visualize_segments_timeline(
                 predicted_segments=pred_segments,
                 ground_truth_segments=gt_segments,
@@ -63,14 +71,8 @@ def run_single_test(evaluator, predicted_file, ground_truth_file, variant_name,
             plt.show()
         except Exception as vis_err:
             print(f"[Visualization error] {vis_err}")
-
-        return results
-    except Exception as e:
-        error_msg = f"ERROR: {str(e)}\n"
-        print(error_msg)
-        if output_file:
-            output_file.write(error_msg)
-        return None
+    
+    return results
 
 def write_report_to_file(results, file_handle, show_per_segment=False):
     """Write formatted evaluation report to file"""
@@ -78,26 +80,28 @@ def write_report_to_file(results, file_handle, show_per_segment=False):
     file_handle.write("SEGMENT EVALUATION REPORT\n")
     file_handle.write("=" * 60 + "\n")
     
-    file_handle.write("\n--- Detection Metrics ---\n")
+    file_handle.write("\n--- Detection Metrics (Segment-Based) ---\n")
     file_handle.write(f"F1 Score:         {results['f1_score']:.4f}\n")
     file_handle.write(f"Precision:        {results['precision']:.4f}\n")
-    file_handle.write(f"Recall:           {results['recall']:.4f}\n")
-    auc_val = results['auc']
+    file_handle.write(f"Recall (TPR):     {results['recall']:.4f}\n")
+    file_handle.write(f"FPR:              {results['fpr']:.4f}\n")
+    auc_val = results.get('auc')
     if auc_val is not None:
         file_handle.write(f"AUC:              {auc_val:.4f}\n")
     else:
-        file_handle.write(f"AUC:              N/A (no confidence scores)\n")
+        file_handle.write(f"AUC:              N/A (no varied confidence scores)\n")
     
-    file_handle.write("\n--- Confusion Matrix ---\n")
-    file_handle.write(f"True Positives:   {results['true_positives']}\n")
-    file_handle.write(f"False Positives:  {results['false_positives']}\n")
-    file_handle.write(f"False Negatives:  {results['false_negatives']}\n")
-    file_handle.write(f"True Negatives:   {results['true_negatives']}\n")
+    file_handle.write("\n--- Confusion Matrix (Segments) ---\n")
+    file_handle.write(f"True Positives:   {results['true_positives']} segments\n")
+    file_handle.write(f"False Positives:  {results['false_positives']} segments\n")
+    file_handle.write(f"False Negatives:  {results['false_negatives']} segments\n")
+    file_handle.write(f"True Negatives:   {results['true_negatives']} segment IDs\n")
     
     file_handle.write("\n--- Temporal Accuracy ---\n")
-    if results['start_errors_mean'] is not None:
+    if results.get('start_errors_mean') is not None:
         file_handle.write(f"Start Time Error (mean): {results['start_errors_mean']:.4f}s\n")
         file_handle.write(f"Start Time Error (std):  {results['start_errors_std']:.4f}s\n")
+        file_handle.write(f"Start Time Error (max):  {results['start_errors_max']:.4f}s\n")
         file_handle.write(f"End Time Error (mean):   {results['end_errors_mean']:.4f}s\n")
         file_handle.write(f"End Time Error (std):    {results['end_errors_std']:.4f}s\n")
         file_handle.write(f"Duration Error (mean):   {results['duration_errors_mean']:.4f}s\n")
@@ -105,11 +109,18 @@ def write_report_to_file(results, file_handle, show_per_segment=False):
         file_handle.write("No matched segments for temporal analysis\n")
     
     file_handle.write("\n--- Segment Counts ---\n")
-    file_handle.write(f"Predicted Segments:     {results['num_predicted']}\n")
-    file_handle.write(f"Ground Truth Segments:  {results['num_ground_truth']}\n")
-    file_handle.write(f"Matched Segments:       {results['num_matched']}\n")
+    # Calculate these from the segment-based metrics
+    num_predicted = results['true_positives'] + results['false_positives']
+    num_ground_truth = results['true_positives'] + results['false_negatives']
+    num_matched = results['true_positives']
     
-    # ADD THIS SECTION FOR PER-SEGMENT BREAKDOWN
+    file_handle.write(f"Predicted Segments:     {num_predicted}\n")
+    file_handle.write(f"Ground Truth Segments:  {num_ground_truth}\n")
+    file_handle.write(f"Matched Segments:       {num_matched}\n")
+    file_handle.write(f"Missed Segments:        {results['false_negatives']}\n")
+    file_handle.write(f"False Alarm Segments:   {results['false_positives']}\n")
+    
+    # Per-segment breakdown
     if 'per_segment_metrics' in results and show_per_segment:
         file_handle.write("\n" + "=" * 60 + "\n")
         file_handle.write("PER-SEGMENT BREAKDOWN\n")
@@ -123,11 +134,17 @@ def write_report_to_file(results, file_handle, show_per_segment=False):
             file_handle.write(f"  Status:        ")
             
             if metrics['detected']:
-                file_handle.write("DETECTED\n")
+                if metrics.get('too_early'):
+                    file_handle.write("DETECTED (TOO EARLY)\n")
+                else:
+                    file_handle.write("DETECTED\n")
             elif metrics['false_positive']:
                 file_handle.write("FALSE POSITIVE\n")
             elif metrics['false_negative']:
-                file_handle.write("MISSED\n")
+                if metrics.get('too_late'):
+                    file_handle.write("MISSED (TOO LATE)\n")
+                else:
+                    file_handle.write("MISSED\n")
             else:
                 file_handle.write("TRUE NEGATIVE\n")
             
@@ -140,7 +157,7 @@ def write_report_to_file(results, file_handle, show_per_segment=False):
     
     file_handle.write("=" * 60 + "\n\n")
 
-def run_all_sanity_tests(ground_truth_file, sanity_check_dir="./SanityCheck", per_segment=False):
+def run_all_sanity_tests(ground_truth_file, sanity_check_dir="./SanityCheck", per_segment=False, timeline_visualisation=False, start_time_threshold_seconds=2.0):
     """
     Run evaluation on all sanity check variants and generate summary report
     
@@ -151,7 +168,7 @@ def run_all_sanity_tests(ground_truth_file, sanity_check_dir="./SanityCheck", pe
     """
     
     # Initialize evaluator
-    evaluator = SegmentEvaluator(time_tolerance_seconds=2.0)
+    evaluator = SegmentEvaluator(time_tolerance_seconds=2.0, start_time_threshold_seconds=start_time_threshold_seconds)
     
     # Expected variants
     variants = [
@@ -188,7 +205,7 @@ def run_all_sanity_tests(ground_truth_file, sanity_check_dir="./SanityCheck", pe
             continue
         
         results = run_single_test(evaluator, predicted_file, ground_truth_file, 
-                                 variant, per_segment=per_segment)
+                                 variant, per_segment=per_segment, timeline_visualisation=timeline_visualisation)
         
         if results:
             all_results[variant] = results
@@ -265,7 +282,7 @@ def run_all_sanity_tests(ground_truth_file, sanity_check_dir="./SanityCheck", pe
     
     # Save results to JSON
     # Save results to JSON
-    output_file = os.path.join(sanity_check_dir, "evaluation_results.json")
+    output_file = os.path.join(sanity_check_dir, "evaluation_results.json")    
     with open(output_file, 'w') as f:
         # Convert results to JSON-serializable format
         
@@ -280,7 +297,7 @@ def run_all_sanity_tests(ground_truth_file, sanity_check_dir="./SanityCheck", pe
         
     return all_results
 
-def test_with_confidence_scores(ground_truth_file, predicted_file, confidence_scores, per_segment=False):
+def test_with_confidence_scores(ground_truth_file, predicted_file, confidence_scores, per_segment=False, start_time_threshold_seconds=2.0):
     """
     Test evaluation with confidence scores (for SVM predictions)
     
@@ -294,7 +311,7 @@ def test_with_confidence_scores(ground_truth_file, predicted_file, confidence_sc
     print("TESTING WITH CONFIDENCE SCORES (SVM Mode)")
     print("="*70)
     
-    evaluator = SegmentEvaluator(time_tolerance_seconds=2.0)
+    evaluator = SegmentEvaluator(time_tolerance_seconds=2.0,start_time_threshold_seconds=start_time_threshold_seconds)
     
     results = evaluator.evaluate(
         predicted_file,
@@ -314,9 +331,9 @@ def test_with_confidence_scores(ground_truth_file, predicted_file, confidence_sc
     
     return results
 
-def quick_test(ground_truth_file, predicted_file, per_segment=False):
+def quick_test(ground_truth_file, predicted_file, per_segment=False, start_time_threshold_seconds=2.0):
     """Quick single-file test"""
-    evaluator = SegmentEvaluator(time_tolerance_seconds=2.0)
+    evaluator = SegmentEvaluator(time_tolerance_seconds=2.0,start_time_threshold_seconds=start_time_threshold_seconds)
     results = evaluator.evaluate(predicted_file, ground_truth_file, per_segment=per_segment)
     evaluator.print_report(results, show_per_segment=per_segment)
     return results
@@ -341,8 +358,14 @@ if __name__ == "__main__":
     
     # Option 2: Ask about per-segment breakdown
     per_segment_enabled = input("\nEnable per-segment breakdown? (y/n): ").lower().strip() == 'y'
+        
+    # Option 3: Ask about timeline visualisation
+    timeline_visualisation_enabled = input("\nEnable segment timeline visualisation? (y/n): ").lower().strip() == 'y'
+        
+    # Option 3: Ask about time tolerance
+    start_time_threshold_seconds = int(input("\nStart and end time tolerance in seconds: ").strip())
     
-    # Option 3: Run full test suite
+    # Option 4: Run full test suite
     print("\n" + "="*70)
     print("Choose test mode:")
     print("1. Run full sanity check test suite")
@@ -355,12 +378,14 @@ if __name__ == "__main__":
     if choice == '1':
         # Full test suite
         all_results = run_all_sanity_tests(GROUND_TRUTH_FILE, SANITY_CHECK_DIR, 
-                                          per_segment=per_segment_enabled)
+                                          per_segment=per_segment_enabled,
+                                          timeline_visualisation=timeline_visualisation_enabled,
+                                          start_time_threshold_seconds=start_time_threshold_seconds)
         
     elif choice == '2':
         # Quick single file test
         predicted = input("Enter predicted file path: ").strip()
-        quick_test(GROUND_TRUTH_FILE, predicted, per_segment=per_segment_enabled)
+        quick_test(GROUND_TRUTH_FILE, predicted, per_segment=per_segment_enabled, start_time_threshold_seconds=start_time_threshold_seconds)
         
     elif choice == '3':
         # Test with confidence scores
@@ -368,7 +393,7 @@ if __name__ == "__main__":
         scores_input = input("Enter confidence scores (comma-separated, e.g., 0.95,0.87,0.92): ").strip()
         confidence_scores = [float(x.strip()) for x in scores_input.split(',')]
         test_with_confidence_scores(GROUND_TRUTH_FILE, predicted, confidence_scores, 
-                                   per_segment=per_segment_enabled)
+                                   per_segment=per_segment_enabled, start_time_threshold_seconds=start_time_threshold_seconds)
     
     else:
         print("Invalid choice. Exiting.")
