@@ -7,7 +7,7 @@ Created 8 variants for testing
 perfect              -> ./SanityCheck\P001_perfect.txt
                         Perfect copy (should get 100% metrics)
 small_time_shift     -> ./SanityCheck\P001_small_time_shift.txt
-                        Small timestamp shifts (1-5s) - within tolerance
+                        Small timestamp shifts (10-15s) - within tolerance
 large_time_shift     -> ./SanityCheck\P001_large_time_shift.txt
                         Large timestamp shifts (15-25s) - beyond threshold
 boundary_errors      -> ./SanityCheck\P001_boundary_errors.txt

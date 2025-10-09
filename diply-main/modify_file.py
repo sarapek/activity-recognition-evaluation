@@ -250,8 +250,8 @@ class SanityCheckModifier:
                 'lines': lines.copy()
             },
             'small_time_shift': {
-                'description': 'Small timestamp shifts (1-5s) - within tolerance',
-                'lines': self.modify_timestamps(lines, 50, (10.0, 15.0)) #try also w negative shifts
+                'description': 'Small timestamp shifts (10-15s) - within tolerance',
+                'lines': self.modify_timestamps(lines, 50, (10.0, 15.0))
             },
             'large_time_shift': {
                 'description': 'Large timestamp shifts (15-25s) - beyond threshold',
@@ -259,7 +259,7 @@ class SanityCheckModifier:
             },
             'boundary_errors': {
                 'description': 'Shifted segment boundaries (5-12s)',
-                'lines': self.shift_segment_boundaries(lines, 70, (5.0, 12.0))
+                'lines': self.shift_segment_boundaries(lines, 70, (10.0, 17.0))
             },
             'missing_segments': {
                 'description': '30% of segment markers removed',
