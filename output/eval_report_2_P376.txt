@@ -1,0 +1,114 @@
+======================================================================
+EVALUATION REPORT: P376.txt
+======================================================================
+Model: quick_test_model
+Predicted file: ./output\predicted_2_P376.txt
+Ground truth file: ./data_spaces\P376.txt
+======================================================================
+
+============================================================
+SEGMENT EVALUATION REPORT
+============================================================
+Start Time Threshold: 15.0s
+Accuracy Tolerance:   2.0s
+
+--- Detection Metrics (Segment-Based) ---
+F1 Score:         0.0149
+Precision:        0.0081
+Recall (TPR):     0.0968
+FPR:              1.0000
+AUC:              N/A (no varied confidence scores)
+
+--- Confusion Matrix (Segments) ---
+True Positives:   3 segments
+False Positives:  369 segments
+False Negatives:  28 segments
+True Negatives:   0 segment IDs
+
+--- Temporal Accuracy ---
+Start Time Error (mean):     7.0913s
+Start Time Error (std):      4.3603s
+Start Time Error (max):      12.7698s
+End Time Error (mean):       93.0468s
+End Time Error (std):        49.6536s
+Duration Error (mean):       93.1840s
+
+--- Segment Counts ---
+Predicted Segments:     372
+Ground Truth Segments:  31
+Matched Segments:       3
+Missed Segments:        28
+False Alarm Segments:   369
+
+============================================================
+PER-SEGMENT BREAKDOWN
+============================================================
+
+--- Segment ID: 1 ---
+  Predicted:     51
+  Ground Truth:  1
+  Status:        DETECTED (TOO EARLY)
+  Start Error:   299.6630s
+  End Error:     529.8533s
+  Duration Err:  230.1903s
+  Within Tol:    NO
+
+--- Segment ID: 2 ---
+  Predicted:     16
+  Ground Truth:  1
+  Status:        DETECTED (TOO EARLY)
+  Start Error:   73.8919s
+  End Error:     142.5110s
+  Duration Err:  68.6192s
+  Within Tol:    NO
+
+--- Segment ID: 3 ---
+  Predicted:     22
+  Ground Truth:  1
+  Status:        DETECTED (TOO EARLY)
+  Start Error:   200.0355s
+  End Error:     350.3465s
+  Duration Err:  150.3110s
+  Within Tol:    NO
+
+--- Segment ID: 4 ---
+  Predicted:     10
+  Ground Truth:  1
+  Status:        DETECTED (TOO EARLY)
+  Start Error:   79.6807s
+  End Error:     452.2735s
+  Duration Err:  372.5927s
+  Within Tol:    NO
+
+--- Segment ID: 5 ---
+  Predicted:     0
+  Ground Truth:  1
+  Status:        MISSED
+
+--- Segment ID: 6 ---
+  Predicted:     5
+  Ground Truth:  1
+  Status:        DETECTED (TOO EARLY)
+  Start Error:   53.0710s
+  End Error:     156.8133s
+  Duration Err:  103.7423s
+  Within Tol:    NO
+
+--- Segment ID: 7 ---
+  Predicted:     117
+  Ground Truth:  1
+  Status:        DETECTED (TOO EARLY)
+  Start Error:   1053.9327s
+  End Error:     1353.3372s
+  Duration Err:  299.4045s
+  Within Tol:    NO
+
+--- Segment ID: 8 ---
+  Predicted:     151
+  Ground Truth:  1
+  Status:        DETECTED (TOO EARLY)
+  Start Error:   2220.9553s
+  End Error:     2221.0658s
+  Duration Err:  0.1105s
+  Within Tol:    NO
+============================================================

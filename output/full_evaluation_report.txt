@@ -1,0 +1,448 @@
+======================================================================
+FULL EVALUATION REPORT
+======================================================================
+Model: quick_test_model
+Training files: 20 (filtered)
+Test files: 3 (unfiltered)
+Time tolerance: 2.0s
+Start time threshold: 15.0s
+======================================================================
+
+
+======================================================================
+TEST FILE 1/3: P206.txt
+======================================================================
+============================================================
+SEGMENT EVALUATION REPORT
+============================================================
+Start Time Threshold: 15.0s
+Accuracy Tolerance:   2.0s
+
+--- Detection Metrics (Segment-Based) ---
+F1 Score:         0.0067
+Precision:        0.0036
+Recall (TPR):     0.0476
+FPR:              1.0000
+AUC:              N/A (no varied confidence scores)
+
+--- Confusion Matrix (Segments) ---
+True Positives:   2 segments
+False Positives:  557 segments
+False Negatives:  40 segments
+True Negatives:   0 segment IDs
+
+--- Temporal Accuracy ---
+Start Time Error (mean):     5.1248s
+Start Time Error (std):      5.5914s
+Start Time Error (max):      14.8996s
+End Time Error (mean):       164.3570s
+End Time Error (std):        72.7210s
+Duration Error (mean):       159.7966s
+
+--- Segment Counts ---
+Predicted Segments:     559
+Ground Truth Segments:  42
+Matched Segments:       2
+Missed Segments:        40
+False Alarm Segments:   557
+
+============================================================
+PER-SEGMENT BREAKDOWN
+============================================================
+
+--- Segment ID: 1 ---
+  Predicted:     75
+  Ground Truth:  2
+  Status:        DETECTED (TOO EARLY)
+  Start Error:   181.0940s
+  End Error:     188.5248s
+  Duration Err:  7.4308s
+  Within Tol:    NO
+
+--- Segment ID: 2 ---
+  Predicted:     24
+  Ground Truth:  1
+  Status:        DETECTED (TOO EARLY)
+  Start Error:   26.4842s
+  End Error:     207.9007s
+  Duration Err:  181.4165s
+  Within Tol:    NO
+
+--- Segment ID: 3 ---
+  Predicted:     25
+  Ground Truth:  1
+  Status:        DETECTED (TOO EARLY)
+  Start Error:   161.0312s
+  End Error:     377.3678s
+  Duration Err:  216.3366s
+  Within Tol:    NO
+
+--- Segment ID: 4 ---
+  Predicted:     23
+  Ground Truth:  1
+  Status:        DETECTED (TOO EARLY)
+  Start Error:   66.7869s
+  End Error:     528.2254s
+  Duration Err:  461.4386s
+  Within Tol:    NO
+
+--- Segment ID: 5 ---
+  Predicted:     11
+  Ground Truth:  1
+  Status:        DETECTED (TOO EARLY)
+  Start Error:   218.4430s
+  End Error:     273.4065s
+  Duration Err:  54.9635s
+  Within Tol:    NO
+
+--- Segment ID: 6 ---
+  Predicted:     17
+  Ground Truth:  1
+  Status:        DETECTED (TOO EARLY)
+  Start Error:   168.2592s
+  End Error:     292.0332s
+  Duration Err:  123.7740s
+  Within Tol:    NO
+
+--- Segment ID: 7 ---
+  Predicted:     161
+  Ground Truth:  2
+  Status:        DETECTED (TOO EARLY)
+  Start Error:   1228.2300s
+  End Error:     1354.8717s
+  Duration Err:  126.6417s
+  Within Tol:    NO
+
+--- Segment ID: 8 ---
+  Predicted:     223
+  Ground Truth:  1
+  Status:        DETECTED (TOO EARLY)
+  Start Error:   2413.6189s
+  End Error:     2542.0032s
+  Duration Err:  128.3843s
+  Within Tol:    NO
+============================================================
+
+
+======================================================================
+TEST FILE 2/3: P335.txt
+======================================================================
+============================================================
+SEGMENT EVALUATION REPORT
+============================================================
+Start Time Threshold: 15.0s
+Accuracy Tolerance:   2.0s
+
+--- Detection Metrics (Segment-Based) ---
+F1 Score:         0.0150
+Precision:        0.0083
+Recall (TPR):     0.0769
+FPR:              1.0000
+AUC:              N/A (no varied confidence scores)
+
+--- Confusion Matrix (Segments) ---
+True Positives:   3 segments
+False Positives:  358 segments
+False Negatives:  36 segments
+True Negatives:   0 segment IDs
+
+--- Temporal Accuracy ---
+Start Time Error (mean):     5.2347s
+Start Time Error (std):      4.1922s
+Start Time Error (max):      11.8469s
+End Time Error (mean):       170.8135s
+End Time Error (std):        94.8778s
+Duration Error (mean):       172.1033s
+
+--- Segment Counts ---
+Predicted Segments:     361
+Ground Truth Segments:  39
+Matched Segments:       3
+Missed Segments:        36
+False Alarm Segments:   358
+
+============================================================
+PER-SEGMENT BREAKDOWN
+============================================================
+
+--- Segment ID: 1 ---
+  Predicted:     57
+  Ground Truth:  1
+  Status:        DETECTED (TOO EARLY)
+  Start Error:   1181.2949s
+  End Error:     1427.6229s
+  Duration Err:  246.3280s
+  Within Tol:    NO
+
+--- Segment ID: 2 ---
+  Predicted:     14
+  Ground Truth:  1
+  Status:        DETECTED (TOO EARLY)
+  Start Error:   674.7067s
+  End Error:     897.1864s
+  Duration Err:  222.4797s
+  Within Tol:    NO
+
+--- Segment ID: 3 ---
+  Predicted:     7
+  Ground Truth:  1
+  Status:        DETECTED (TOO EARLY)
+  Start Error:   152.2793s
+  End Error:     293.3206s
+  Duration Err:  141.0413s
+  Within Tol:    NO
+
+--- Segment ID: 4 ---
+  Predicted:     15
+  Ground Truth:  2
+  Status:        DETECTED (TOO EARLY)
+  Start Error:   2032.9549s
+  End Error:     2112.3419s
+  Duration Err:  79.3871s
+  Within Tol:    NO
+
+--- Segment ID: 5 ---
+  Predicted:     1
+  Ground Truth:  1
+  Status:        DETECTED (TOO EARLY)
+  Start Error:   2544.1550s
+  End Error:     2597.7988s
+  Duration Err:  53.6439s
+  Within Tol:    NO
+
+--- Segment ID: 6 ---
+  Predicted:     6
+  Ground Truth:  1
+  Status:        DETECTED
+  Start Error:   0.0000s
+  End Error:     105.9084s
+  Duration Err:  105.9084s
+  Within Tol:    NO
+
+--- Segment ID: 7 ---
+  Predicted:     109
+  Ground Truth:  2
+  Status:        DETECTED (TOO EARLY)
+  Start Error:   2343.2124s
+  End Error:     2373.3846s
+  Duration Err:  30.1722s
+  Within Tol:    NO
+
+--- Segment ID: 8 ---
+  Predicted:     152
+  Ground Truth:  1
+  Status:        DETECTED (TOO EARLY)
+  Start Error:   3098.4859s
+  End Error:     3085.3256s
+  Duration Err:  13.1603s
+  Within Tol:    NO
+============================================================
+
+
+======================================================================
+TEST FILE 3/3: P376.txt
+======================================================================
+============================================================
+SEGMENT EVALUATION REPORT
+============================================================
+Start Time Threshold: 15.0s
+Accuracy Tolerance:   2.0s
+
+--- Detection Metrics (Segment-Based) ---
+F1 Score:         0.0149
+Precision:        0.0081
+Recall (TPR):     0.0968
+FPR:              1.0000
+AUC:              N/A (no varied confidence scores)
+
+--- Confusion Matrix (Segments) ---
+True Positives:   3 segments
+False Positives:  369 segments
+False Negatives:  28 segments
+True Negatives:   0 segment IDs
+
+--- Temporal Accuracy ---
+Start Time Error (mean):     7.0913s
+Start Time Error (std):      4.3603s
+Start Time Error (max):      12.7698s
+End Time Error (mean):       93.0468s
+End Time Error (std):        49.6536s
+Duration Error (mean):       93.1840s
+
+--- Segment Counts ---
+Predicted Segments:     372
+Ground Truth Segments:  31
+Matched Segments:       3
+Missed Segments:        28
+False Alarm Segments:   369
+
+============================================================
+PER-SEGMENT BREAKDOWN
+============================================================
+
+--- Segment ID: 1 ---
+  Predicted:     51
+  Ground Truth:  1
+  Status:        DETECTED (TOO EARLY)
+  Start Error:   299.6630s
+  End Error:     529.8533s
+  Duration Err:  230.1903s
+  Within Tol:    NO
+
+--- Segment ID: 2 ---
+  Predicted:     16
+  Ground Truth:  1
+  Status:        DETECTED (TOO EARLY)
+  Start Error:   73.8919s
+  End Error:     142.5110s
+  Duration Err:  68.6192s
+  Within Tol:    NO
+
+--- Segment ID: 3 ---
+  Predicted:     22
+  Ground Truth:  1
+  Status:        DETECTED (TOO EARLY)
+  Start Error:   200.0355s
+  End Error:     350.3465s
+  Duration Err:  150.3110s
+  Within Tol:    NO
+
+--- Segment ID: 4 ---
+  Predicted:     10
+  Ground Truth:  1
+  Status:        DETECTED (TOO EARLY)
+  Start Error:   79.6807s
+  End Error:     452.2735s
+  Duration Err:  372.5927s
+  Within Tol:    NO
+
+--- Segment ID: 5 ---
+  Predicted:     0
+  Ground Truth:  1
+  Status:        MISSED
+
+--- Segment ID: 6 ---
+  Predicted:     5
+  Ground Truth:  1
+  Status:        DETECTED (TOO EARLY)
+  Start Error:   53.0710s
+  End Error:     156.8133s
+  Duration Err:  103.7423s
+  Within Tol:    NO
+
+--- Segment ID: 7 ---
+  Predicted:     117
+  Ground Truth:  1
+  Status:        DETECTED (TOO EARLY)
+  Start Error:   1053.9327s
+  End Error:     1353.3372s
+  Duration Err:  299.4045s
+  Within Tol:    NO
+
+--- Segment ID: 8 ---
+  Predicted:     151
+  Ground Truth:  1
+  Status:        DETECTED (TOO EARLY)
+  Start Error:   2220.9553s
+  End Error:     2221.0658s
+  Duration Err:  0.1105s
+  Within Tol:    NO
+============================================================
+
+
+======================================================================
+AGGREGATED PER-SEGMENT METRICS (ALL TEST FILES)
+======================================================================
+
+--- Segment ID: 1 ---
+  Total Predicted:     183
+  Total Ground Truth:  4
+  Detected:            3
+  False Positives:     0
+  False Negatives:     0
+  Start Error (mean):  554.0173s (±446.1857s)
+  End Error (mean):    715.3336s
+  Duration Err (mean): 161.3163s
+  Within Tolerance:    0/3
+
+--- Segment ID: 2 ---
+  Total Predicted:     54
+  Total Ground Truth:  3
+  Detected:            3
+  False Positives:     0
+  False Negatives:     0
+  Start Error (mean):  258.3609s (±295.0364s)
+  End Error (mean):    415.8660s
+  Duration Err (mean): 157.5051s
+  Within Tolerance:    0/3
+
+--- Segment ID: 3 ---
+  Total Predicted:     54
+  Total Ground Truth:  3
+  Detected:            3
+  False Positives:     0
+  False Negatives:     0
+  Start Error (mean):  171.1153s (±20.7594s)
+  End Error (mean):    340.3449s
+  Duration Err (mean): 169.2296s
+  Within Tolerance:    0/3
+
+--- Segment ID: 4 ---
+  Total Predicted:     48
+  Total Ground Truth:  4
+  Detected:            3
+  False Positives:     0
+  False Negatives:     0
+  Start Error (mean):  726.4742s (±923.8364s)
+  End Error (mean):    1030.9470s
+  Duration Err (mean): 304.4728s
+  Within Tolerance:    0/3
+
+--- Segment ID: 5 ---
+  Total Predicted:     12
+  Total Ground Truth:  3
+  Detected:            2
+  False Positives:     0
+  False Negatives:     1
+  Start Error (mean):  1381.2990s (±1162.8560s)
+  End Error (mean):    1435.6027s
+  Duration Err (mean): 54.3037s
+  Within Tolerance:    0/2
+
+--- Segment ID: 6 ---
+  Total Predicted:     28
+  Total Ground Truth:  3
+  Detected:            3
+  False Positives:     0
+  False Negatives:     0
+  Start Error (mean):  73.7767s (±70.2345s)
+  End Error (mean):    184.9183s
+  Duration Err (mean): 111.1416s
+  Within Tolerance:    0/3
+
+--- Segment ID: 7 ---
+  Total Predicted:     387
+  Total Ground Truth:  5
+  Detected:            3
+  False Positives:     0
+  False Negatives:     0
+  Start Error (mean):  1541.7917s (±571.1399s)
+  End Error (mean):    1693.8645s
+  Duration Err (mean): 152.0728s
+  Within Tolerance:    0/3
+
+--- Segment ID: 8 ---
+  Total Predicted:     526
+  Total Ground Truth:  3
+  Detected:            3
+  False Positives:     0
+  False Negatives:     0
+  Start Error (mean):  2577.6867s (±376.5667s)
+  End Error (mean):    2616.1315s
+  Duration Err (mean): 47.2183s
+  Within Tolerance:    0/3
+======================================================================
+
+======================================================================
+END OF EVALUATION REPORT
+======================================================================
