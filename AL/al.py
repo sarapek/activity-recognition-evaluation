@@ -59,7 +59,7 @@ def find_sensor(sensorname):
         i = cf.sensornames.index(sensorname)
         return i
     except:
-        print("Could not find sensor ", sensorname)
+        #print("Could not find sensor ", sensorname)
         return -1
 
 
@@ -467,6 +467,7 @@ def test_model():
 
 def annotate_data(filename):
     """ Add activity labels to an input file containing sensor readings.
+    Also outputs confidence scores if the classifier supports predict_proba.
     """
     datafile = open(filename, "r")
     date = ""
@@ -519,12 +520,28 @@ def annotate_data(filename):
     # Make predictions
     if len(fulldata) > 0:
         predict_alabel = cf.clf.predict(fulldata)
+        
+        # Try to get confidence scores
+        has_confidence = False
+        predict_confidence = None
+        if hasattr(cf.clf, 'predict_proba'):
+            try:
+                predict_proba = cf.clf.predict_proba(fulldata)
+                # Get max probability for each prediction
+                predict_confidence = np.max(predict_proba, axis=1)
+                has_confidence = True
+                print(f"Confidence scores available: min={np.min(predict_confidence):.3f}, "
+                      f"max={np.max(predict_confidence):.3f}, mean={np.mean(predict_confidence):.3f}")
+            except Exception as e:
+                print(f"Warning: Could not get confidence scores: {e}")
+                has_confidence = False
     else:
         predict_alabel = []
+        has_confidence = False
     
     datafile.close()
 
-    # Second pass: write output with predictions
+    # Second pass: write output with predictions and confidence scores
     datafile = open(filename, "r")
     linenum = 0
     prediction_index = 0
@@ -542,24 +559,42 @@ def annotate_data(filename):
         
         # Assign activity label
         if prediction_index < len(predict_alabel):
-            aname = cf.activitynames[predict_alabel[prediction_index]]
+            if prediction_index >= len(cf.activitynames) or prediction_index < 0:
+                aname = "Other_Activity"
+            else:
+                aname = cf.activitynames[prediction_index]
+                
             if aname.startswith("cluster_"):
                 aname = "Other_Activity"
+            
+            # Build output string with confidence if available
+            outstr = date + " " + stime + " " + sensorid + " " + newsensorid + " "
+            outstr += sensorstatus + " " + aname
+            
+            if has_confidence and prediction_index < len(predict_confidence):
+                outstr += f" {predict_confidence[prediction_index]:.6f}"
+            
+            outstr += "\n"
             prediction_index += 1
         else:
             # No prediction available yet (first max_window events)
-            aname = "Other_Activity"
+            outstr = date + " " + stime + " " + sensorid + " " + newsensorid + " "
+            outstr += sensorstatus + " Other_Activity"
+            if has_confidence:
+                outstr += " 0.000000"  # Low confidence for unpredicted
+            outstr += "\n"
         
-        outstr = date + " " + stime + " " + sensorid + " " + newsensorid + " "
-        outstr += sensorstatus + " " + aname + "\n"
         outputfile.write(outstr)
         linenum += 1
     
     outputfile.close()
     datafile.close()
     
-    print(f"Annotated {linenum} lines with {len(predict_alabel)} predictions")
-
+    if has_confidence:
+        print(f"Annotated {linenum} lines with {len(predict_alabel)} predictions and confidence scores")
+    else:
+        print(f"Annotated {linenum} lines with {len(predict_alabel)} predictions (no confidence scores available)")
+        
 def main(args):
     files = cf.set_parameters()
     cf.num_features = cf.num_set_features + (2 * cf.num_sensors)

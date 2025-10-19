@@ -34,7 +34,7 @@ class Config:
     def __init__(self):
         """ Constructor
         """
-        self.activitynames = ['1', '2', '3', '4', '5', '6', '7', '8']
+        self.activitynames = ['1', '2', '3', '4', '5', '6', '7', '8', 'Other_Activity']
         self.current_seconds_of_day = 0
         self.current_timestamp = 0
         self.day_of_week = 0
@@ -57,7 +57,7 @@ class Config:
                             'MA201', 'MA202', 'MA203', 'MA204', 'MA205', 'MA206', 'MA207', 
                             'R001', 'R002', 'T001', 'T002', 'T003', 'T004', 'T005', 'T101', 
                             'T102', 'T103', 'T104', 'T105', 'T106', 'T107', 'T108', 'T109',
-                            'T110', 'T111']
+                            'T110', 'T111', 'P001', 'P002', 'A001', 'A002']
         self.sensortimes = []
         self.data = []
         self.dstype = []

@@ -5,6 +5,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 from typing import List, Optional, Tuple
 import numpy as np
+from pathlib import Path
 
 
 def visualize_segments_timeline(
@@ -363,8 +364,14 @@ if __name__ == "__main__":
         segment_ids=[str(i) for i in range(1, 9)],
         title="P001: Ground Truth vs Predicted (Two-Panel View)"
     )
-    plt.savefig('p001_timeline_twopanel.png', dpi=150, bbox_inches='tight')
-    print("Saved: p001_timeline_twopanel.png")
+    # Ensure a deterministic output directory at the repository root
+    repo_root = Path(__file__).resolve().parents[1]
+    out_dir = repo_root / 'output'
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    out_path = out_dir / 'p001_timeline_twopanel.png'
+    plt.savefig(str(out_path), dpi=150, bbox_inches='tight')
+    print(f"Saved: {out_path}")
     
     # Visualize - combined view
     fig2, ax2 = visualize_segments_combined(
@@ -373,8 +380,9 @@ if __name__ == "__main__":
         segment_ids=[str(i) for i in range(1, 9)],
         title="P001: Ground Truth vs Predicted (Combined View)"
     )
-    plt.savefig('p001_timeline_combined.png', dpi=150, bbox_inches='tight')
-    print("Saved: p001_timeline_combined.png")
+    out_path = out_dir / 'p001_timeline_combined.png'
+    plt.savefig(str(out_path), dpi=150, bbox_inches='tight')
+    print(f"Saved: {out_path}")
     
     # Optional: Show specific time interval
     if gt_segments:
@@ -389,8 +397,9 @@ if __name__ == "__main__":
             time_interval=(start, end),
             title="P001: First 2 Minutes Detail"
         )
-        plt.savefig('p001_timeline_detail.png', dpi=150, bbox_inches='tight')
-        print("Saved: p001_timeline_detail.png")
+    out_path = out_dir / 'p001_timeline_detail.png'
+    plt.savefig(str(out_path), dpi=150, bbox_inches='tight')
+    print(f"Saved: {out_path}")
     
     plt.show()
     

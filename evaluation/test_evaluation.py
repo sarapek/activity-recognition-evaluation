@@ -342,8 +342,8 @@ def quick_test(ground_truth_file, predicted_file, per_segment=False, start_time_
 if __name__ == "__main__":
     
     # Configuration
-    GROUND_TRUTH_FILE = "./RawData/P001.txt"
-    SANITY_CHECK_DIR = "./SanityCheck"
+    GROUND_TRUTH_FILE = "../data/P001.txt"
+    SANITY_CHECK_DIR = "../SanityCheck"
     
     print("\n" + "="*70)
     print("SEGMENT EVALUATION TESTING SYSTEM")

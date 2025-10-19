@@ -8,27 +8,56 @@ import re
 class SegmentEvaluator:
     """Evaluates segment-based recognition against ground truth"""
     
-    def __init__(self, time_tolerance_seconds=2.0, start_time_threshold_seconds=15.0):
+    def __init__(self, start_time_threshold_seconds=15.0):
         """
         Args:
-            time_tolerance_seconds: Maximum allowed time error for "accurate" detection
             start_time_threshold_seconds: Maximum delay allowed for recognition to count as detection (not a miss)
         """
-        self.time_tolerance = time_tolerance_seconds
         self.start_threshold = start_time_threshold_seconds
         
     def parse_log_file(self, filepath: str) -> pd.DataFrame:
-        """Parse the log file into a structured DataFrame (space-separated format)"""
+        """Parse the log file into a structured DataFrame (space-separated format)
+        
+        Handles formats:
+        - 7 parts: date time sensor newsensor status activity confidence
+        - 6 parts: date time sensor newsensor status activity (AL output)
+        - 5 parts: date time sensor status activity (ground truth)
+        """
         data = []
         with open(filepath, 'r') as f:
             for line in f:
                 parts = line.strip().split()
                 
-                # Detect format: 6 parts = AL output (with duplicate sensor)
-                #                5 parts = ground truth (no duplicate sensor)
-                if len(parts) >= 6:
-                    # AL format: date time sensor newsensor status activity
-                    try:
+                try:
+                    if len(parts) >= 7:
+                        # AL format WITH confidence: date time sensor newsensor status activity confidence
+                        date_str = parts[0]
+                        time_str = parts[1]
+                        timestamp_str = f"{date_str} {time_str}"
+                        
+                        # Parse timestamp
+                        try:
+                            timestamp = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S.%f')
+                        except ValueError:
+                            timestamp = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S')
+                        
+                        sensor_id = parts[2]
+                        # parts[3] is newsensor (duplicate, skip)
+                        status = parts[4]
+                        activity = parts[5]
+                        confidence = float(parts[6])
+                        
+                        data.append({
+                            'timestamp': timestamp,
+                            'event_id': sensor_id,
+                            'state': status,
+                            'annotation': activity,
+                            'confidence': confidence,
+                            'errors': ''
+                        })
+                        
+                    elif len(parts) >= 6:
+                        # AL format WITHOUT confidence: date time sensor newsensor status activity
                         date_str = parts[0]
                         time_str = parts[1]
                         timestamp_str = f"{date_str} {time_str}"
@@ -51,12 +80,9 @@ class SegmentEvaluator:
                             'annotation': activity,
                             'errors': ''
                         })
-                    except (ValueError, IndexError) as e:
-                        continue
                         
-                elif len(parts) >= 5:
-                    # Ground truth format: date time sensor status activity
-                    try:
+                    elif len(parts) >= 5:
+                        # Ground truth format: date time sensor status activity
                         date_str = parts[0]
                         time_str = parts[1]
                         timestamp_str = f"{date_str} {time_str}"
@@ -67,8 +93,8 @@ class SegmentEvaluator:
                             timestamp = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S')
                         
                         sensor_id = parts[2]
-                        status = parts[3]  # Changed from parts[4]
-                        activity = parts[4]  # Changed from parts[5]
+                        status = parts[3]
+                        activity = parts[4]
                         
                         data.append({
                             'timestamp': timestamp,
@@ -77,19 +103,31 @@ class SegmentEvaluator:
                             'annotation': activity,
                             'errors': ''
                         })
-                    except (ValueError, IndexError) as e:
-                        continue
-        
-        return pd.DataFrame(data)
+                except (ValueError, IndexError) as e:
+                    continue
     
-    def extract_segments(self, df: pd.DataFrame) -> List[Dict]:
-        """Extract segments from annotations (continuous activity numbers or start/end markers)"""
+        return pd.DataFrame(data)
+
+    def extract_segments(self, df: pd.DataFrame, confidence_threshold: float = 0.0) -> List[Dict]:
+        """Extract segments from annotations (continuous activity numbers or start/end markers)
+        
+        Args:
+            df: DataFrame with annotations
+            confidence_threshold: Minimum confidence to consider a prediction valid (default 0.0 = no filtering)
+        """
         segments = []
         current_activity = None
         segment_start = None
         
         for idx, row in df.iterrows():
             annotation = str(row['annotation']).strip()
+            
+            # Check confidence if available
+            if 'confidence' in df.columns and confidence_threshold > 0:
+                confidence = row.get('confidence', 0.0)
+                if confidence < confidence_threshold:
+                    # Low confidence - treat as Other_Activity
+                    annotation = 'Other_Activity'
             
             # Skip empty annotations or Other_Activity
             if not annotation or annotation == 'nan' or annotation == 'Other_Activity':
@@ -234,8 +272,8 @@ class SegmentEvaluator:
                 
                 start_diff = (pred_seg['start_time'] - gt_seg['start_time']).total_seconds()
                 
-                # Recognition is valid if it starts within threshold (can be late, but not too late)
-                if 0 <= start_diff <= self.start_threshold:
+                # Recognition is valid if start time difference is within threshold (early or late)
+                if abs(start_diff) <= self.start_threshold:
                     result['detected'] = True
                     
                     # Calculate timing errors
@@ -246,16 +284,10 @@ class SegmentEvaluator:
                     result['start_error'] = start_error
                     result['end_error'] = end_error
                     result['duration_error'] = duration_error
-                    result['within_tolerance'] = (start_error <= self.time_tolerance and 
-                                                 end_error <= self.time_tolerance)
-                elif start_diff < 0:
-                    # Predicted too early - still detected but with negative error
-                    result['detected'] = True
-                    result['start_error'] = abs(start_diff)
-                    result['end_error'] = abs((pred_seg['end_time'] - gt_seg['end_time']).total_seconds())
-                    result['duration_error'] = abs(pred_seg['duration'] - gt_seg['duration'])
-                    result['within_tolerance'] = False
-                    result['too_early'] = True
+                    
+                    # Mark if too early
+                    if start_diff < 0:
+                        result['too_early'] = True
                 else:
                     # Predicted too late (> threshold) - counts as miss
                     result['false_negative'] = True
@@ -264,7 +296,6 @@ class SegmentEvaluator:
                     result['too_late'] = True
                     result['end_error'] = None
                     result['duration_error'] = None
-                    result['within_tolerance'] = False
             elif pred_segs and not gt_segs:
                 result['false_positive'] = True
             elif not pred_segs and gt_segs:
@@ -279,8 +310,6 @@ class SegmentEvaluator:
                 result['end_error'] = None
             if 'duration_error' not in result:
                 result['duration_error'] = None
-            if 'within_tolerance' not in result:
-                result['within_tolerance'] = None
             
             per_segment_results[seg_id] = result
         
@@ -434,26 +463,46 @@ class SegmentEvaluator:
             'true_negatives': true_negatives,
         }
         
-        # Calculate ROC and AUC only if confidence scores are provided
         if confidence_scores is not None and len(confidence_scores) > 0:
             # Only calculate if we have varied confidence scores
+            print(f"  Debug: Have {len(confidence_scores)} confidence scores")
+            print(f"  Debug: Unique confidence values: {len(np.unique(confidence_scores))}")
+            print(f"  Debug: Confidence range: {np.min(confidence_scores):.3f} to {np.max(confidence_scores):.3f}")
+            
             if len(np.unique(confidence_scores)) > 1:
                 try:
                     # Create binary labels for each prediction
                     y_true = np.array([1 if i in matched_pred else 0 for i in range(len(predicted_segments))])
                     y_scores = np.array(confidence_scores[:len(predicted_segments)])
                     
-                    # Calculate ROC curve and AUC
-                    fpr_curve, tpr_curve, thresholds = roc_curve(y_true, y_scores)
-                    roc_auc = auc(fpr_curve, tpr_curve)
+                    print(f"  Debug: {len(y_true)} predictions, {sum(y_true)} TPs, {len(y_true)-sum(y_true)} FPs")
+                    print(f"  Debug: {len(np.unique(y_true))} unique labels in y_true")
                     
-                    results['auc'] = roc_auc
+                    # Check if we have both classes
+                    if len(np.unique(y_true)) > 1:
+                        # Calculate ROC curve and AUC
+                        fpr_curve, tpr_curve, thresholds = roc_curve(y_true, y_scores)
+                        roc_auc = auc(fpr_curve, tpr_curve)
+                        
+                        results['auc'] = roc_auc
+                        # Store ROC curve data for plotting
+                        results['roc_curve'] = {
+                            'fpr': fpr_curve,
+                            'tpr': tpr_curve,
+                            'thresholds': thresholds
+                        }
+                        print(f"  Debug: ✓ ROC/AUC calculated successfully: {roc_auc:.4f}")
+                    else:
+                        print(f"  Debug: ✗ Cannot calculate ROC - only one class present (all {y_true[0]}s)")
+                        results['auc'] = None
                 except Exception as e:
                     print(f"Warning: Could not calculate ROC/AUC: {e}")
                     results['auc'] = None
             else:
+                print(f"  Debug: ✗ All confidence scores are identical ({confidence_scores[0]:.3f})")
                 results['auc'] = None
         else:
+            print(f"  Debug: ✗ No confidence scores provided")
             results['auc'] = None
         
         return results
@@ -542,7 +591,6 @@ class SegmentEvaluator:
         print("SEGMENT EVALUATION REPORT")
         print("=" * 60)
         print(f"Start Time Threshold: {self.start_threshold}s")
-        print(f"Accuracy Tolerance:   {self.time_tolerance}s")
         
         print("\n--- Detection Metrics (Segment-Based) ---")
         print(f"F1 Score:         {results['f1_score']:.4f}")
@@ -587,8 +635,8 @@ class SegmentEvaluator:
             per_seg = results['per_segment_metrics']
             for seg_id, metrics in sorted(per_seg.items()):
                 print(f"\n--- Segment ID: {seg_id} ---")
-                print(f"  Predicted:     {metrics['num_predicted']}")  # Changed from true_positives + false_positives
-                print(f"  Ground Truth:  {metrics['num_ground_truth']}")  # Changed from true_positives + false_negatives
+                print(f"  Predicted:     {metrics['num_predicted']}")
+                print(f"  Ground Truth:  {metrics['num_ground_truth']}")
                 print(f"  Status:        ", end="")
                 
                 if metrics['detected']:
@@ -610,8 +658,6 @@ class SegmentEvaluator:
                     print(f"  Start Error:   {metrics['start_error']:.4f}s")
                     print(f"  End Error:     {metrics['end_error']:.4f}s")
                     print(f"  Duration Err:  {metrics['duration_error']:.4f}s")
-                    tolerance_str = "✓" if metrics['within_tolerance'] else "✗"
-                    print(f"  Within Tol:    {tolerance_str}")
                 
         print("=" * 60)
 
@@ -619,10 +665,9 @@ class SegmentEvaluator:
 # Example usage
 if __name__ == "__main__":
     
-    # Initialize evaluator with thresholds
+    # Initialize evaluator with threshold
     evaluator = SegmentEvaluator(
-        time_tolerance_seconds=2.0,
-        start_time_threshold_seconds=15.0
+        start_time_threshold_seconds=300.0
     )
     
     # Example 1: Evaluation without confidence scores

@@ -1,84 +1,9 @@
-# Aggregate per-segment metrics across all files
-        print(f"\n{'='*70}")
-        print("AGGREGATED PER-SEGMENT METRICS (ALL TEST FILES)")
-        print(f"{'='*70}")
-        
-        # Collect all segments across all files
-        aggregated_segments = {}
-        
-        for item in all_results:
-            pred_segs = item['pred_segments']
-            gt_segs = item['gt_segments']
-            
-            # We need to manually calculate per-segment metrics since we disabled them in individual evaluations
-            # Re-run evaluate_segments with per_segment=True just to get the metrics for aggregation
-            temp_results = evaluator.evaluate_segments(pred_segs, gt_segs, per_segment=True)
-            
-            # Group by segment_id
-            for seg_id in range(1, 9):
-                seg_id_str = str(seg_id)
-                
-                if seg_id_str not in aggregated_segments:
-                    aggregated_segments[seg_id_str] = {
-                        'total_predicted': 0,
-                        'total_ground_truth': 0,
-                        'true_positives': 0,
-                        'false_positives': 0,
-                        'false_negatives': 0,
-                        'start_errors': [],
-                        'end_errors': [],
-                        'duration_errors': [],
-                        'within_tolerance_count': 0,
-                    }
-                
-                # Count predicted segments for this ID
-                pred_count = len([s for s in pred_segs if s.get('segment_id') == seg_id_str])
-                gt_count = len([s for s in gt_segs if s.get('segment_id') == seg_id_str])
-                
-                aggregated_segments[seg_id_str]['total_predicted'] += pred_count
-                aggregated_segments[seg_id_str]['total_ground_truth'] += gt_count
-                
-            # Now calculate TP, FP, FN from the per_segment_metrics
-            if 'per_segment_metrics' in temp_results:
-                per_seg = temp_results['per_segment_metrics']
-                for seg_id, metrics in per_seg.items():
-                    if seg_id not in aggregated_segments:
-                        continue
-                        
-                    agg = aggregated_segments[seg_id]
-                    
-                    # For this file and segment ID, determine TP/FP/FN
-                    num_pred = metrics['num_predicted']
-                    num_gt = metrics['num_ground_truth']
-                    
-                    if metrics['detected']:
-                        # True positive - one segment matched
-                        agg['true_positives'] += 1
-                        # Any extra predictions beyond the first are false positives
-                        if num_pred > 1:
-                            agg['false_positives'] += (num_pred - 1)
-                        # Any extra ground truths beyond the first are false negatives
-                        if num_gt > 1:
-                            agg['false_negatives'] += (num_gt - 1)
-                    else:
-                        # Not detected
-                        if num_pred > 0 and num_gt == 0:
-                            # False positives - predicted but no ground truth
-                            agg['false_positives'] += num_pred
-                        elif num_pred == 0 and num_gt > 0:
-                            # False negatives - ground truth but no prediction
-                            agg['false_negatives'] += num_gt
-                        elif num_pred > 0 and num_gt > 0:
-                            # Mismatch - predicted but too late or too early
-                            agg['false_negatives'] += num_gt
-                            agg['false_positives'] += num_pred
-                    
-                    # Collect timing errors
-                    if metrics['start_errorimport os
+import os
 import random
 import subprocess
 import shutil
 import sys
+from datetime import datetime
 
 # Add evaluation folder to path
 sys.path.append('./evaluation')
@@ -93,7 +18,6 @@ def write_evaluation_to_file(file_handle, results, evaluator, show_per_segment=T
     file_handle.write("SEGMENT EVALUATION REPORT\n")
     file_handle.write("="*60 + "\n")
     file_handle.write(f"Start Time Threshold: {evaluator.start_threshold}s\n")
-    file_handle.write(f"Accuracy Tolerance:   {evaluator.time_tolerance}s\n")
     
     file_handle.write("\n--- Detection Metrics (Segment-Based) ---\n")
     file_handle.write(f"F1 Score:         {results['f1_score']:.4f}\n")
@@ -161,8 +85,6 @@ def write_evaluation_to_file(file_handle, results, evaluator, show_per_segment=T
                 file_handle.write(f"  Start Error:   {metrics['start_error']:.4f}s\n")
                 file_handle.write(f"  End Error:     {metrics['end_error']:.4f}s\n")
                 file_handle.write(f"  Duration Err:  {metrics['duration_error']:.4f}s\n")
-                tolerance_str = "YES" if metrics['within_tolerance'] else "NO"
-                file_handle.write(f"  Within Tol:    {tolerance_str}\n")
     
     file_handle.write("="*60 + "\n")
 
@@ -185,16 +107,20 @@ def check_existing_model(model_name='quick_test_model'):
     model_path = os.path.join('./AL/model', f'{model_name}.pkl.gz')
     return os.path.exists(model_path)
 
-def run_quick_test(train_files, test_files, visualize=True, use_existing_model=False, model_name='quick_test_model'):
+def run_quick_test(train_files, test_files, output_dir, visualize=True, 
+                   use_existing_model=False, model_name='quick_test_model',
+                   start_error_threshold=15.0):
     """
     Quick test: Train on filtered files, test on unfiltered files
     
     Args:
         train_files: List of file paths for training (from filtered data)
         test_files: List of file paths for testing (from unfiltered data)
+        output_dir: Directory to save outputs
         visualize: If True, show timeline visualizations
         use_existing_model: If True, skip training and use existing model
         model_name: Name of the model to use/create
+        start_error_threshold: Threshold in seconds for start time error
     """
     print(f"\n{'='*70}")
     print("QUICK TEST MODE - Train on filtered, Test on unfiltered")
@@ -208,10 +134,8 @@ def run_quick_test(train_files, test_files, visualize=True, use_existing_model=F
     
     print(f"Testing files (unfiltered): {len(test_files)}")
     
-    # Create output directory
-    output_dir = './output'
+    # Create temp directory
     temp_dir = './temp'
-    os.makedirs(output_dir, exist_ok=True)
     os.makedirs(temp_dir, exist_ok=True)
     
     # Step 1 & 2: Train model (only if not using existing)
@@ -250,27 +174,11 @@ def run_quick_test(train_files, test_files, visualize=True, use_existing_model=F
     
     # Step 3: Initialize evaluator
     evaluator = SegmentEvaluator(
-        time_tolerance_seconds=2.0,
-        start_time_threshold_seconds=15.0
+        start_time_threshold_seconds=start_error_threshold
     )
     
     # Step 4: Process each test file
     all_results = []
-    
-    # Open combined report file
-    combined_report_path = os.path.join(output_dir, 'full_evaluation_report.txt')
-    combined_report = open(combined_report_path, 'w')
-    
-    # Write header to combined report
-    combined_report.write("="*70 + "\n")
-    combined_report.write("FULL EVALUATION REPORT\n")
-    combined_report.write("="*70 + "\n")
-    combined_report.write(f"Model: {model_name}\n")
-    combined_report.write(f"Training files: {len(train_files)} (filtered)\n")
-    combined_report.write(f"Test files: {len(test_files)} (unfiltered)\n")
-    combined_report.write(f"Time tolerance: {evaluator.time_tolerance}s\n")
-    combined_report.write(f"Start time threshold: {evaluator.start_threshold}s\n")
-    combined_report.write("="*70 + "\n\n")
     
     for idx, test_file in enumerate(test_files):
         print(f"\n{'='*70}")
@@ -346,9 +254,50 @@ def run_quick_test(train_files, test_files, visualize=True, use_existing_model=F
             # Parse both files
             pred_df = evaluator.parse_log_file(saved_annotated)
             gt_df = evaluator.parse_log_file(test_file)
-            
-            print(f"  Parsed {len(pred_df)} predicted events")
-            print(f"  Parsed {len(gt_df)} ground truth events")
+                        
+            # Extract confidence scores if available
+            confidence_scores = None
+            if 'confidence' in pred_df.columns:
+                print("  Confidence column found in predictions")
+                # Group by segment and get mean confidence per segment
+                pred_segments_temp = evaluator.extract_segments(pred_df)
+                confidence_scores = []
+                
+                for seg in pred_segments_temp:
+                    seg_id = seg['segment_id']
+                    seg_start = seg['start_time']
+                    seg_end = seg['end_time']
+                    
+                    # Get confidence scores for events in this segment's time range
+                    # Filter by timestamp and check if annotation matches the segment ID
+                    seg_mask = (pred_df['timestamp'] >= seg_start) & (pred_df['timestamp'] <= seg_end)
+                    seg_df = pred_df[seg_mask]
+                    
+                    # Further filter by activity - extract number from annotation
+                    matching_rows = []
+                    for idx_row, row in seg_df.iterrows():
+                        annotation = str(row['annotation']).strip()
+                        # Extract activity ID from annotation (handles "1", "1.1", "1-start", etc.)
+                        import re
+                        match = re.match(r'^(\d+)', annotation)
+                        if match and match.group(1) == seg_id:
+                            matching_rows.append(row)
+                    
+                    if matching_rows:
+                        # Calculate mean confidence for this segment
+                        confidences = [r['confidence'] for r in matching_rows]
+                        mean_conf = sum(confidences) / len(confidences)
+                        confidence_scores.append(mean_conf)
+                    else:
+                        # No matching events found, use default
+                        confidence_scores.append(0.5)
+                
+                print(f"  Extracted {len(confidence_scores)} confidence scores for {len(pred_segments_temp)} segments")
+                if confidence_scores:
+                    import numpy as np
+                    print(f"  Confidence range: {np.min(confidence_scores):.3f} to {np.max(confidence_scores):.3f}, mean: {np.mean(confidence_scores):.3f}")
+            else:
+                print("  No confidence column found in predictions")
             
             # Extract segments
             pred_segments = evaluator.extract_segments(pred_df)
@@ -364,51 +313,24 @@ def run_quick_test(train_files, test_files, visualize=True, use_existing_model=F
                 print("ERROR: No predicted segments found. Skipping this file.")
                 continue
             
-            # Calculate metrics
+            # Calculate metrics with confidence scores
             print("\nCalculating metrics...")
             results = evaluator.evaluate_segments(
                 pred_segments, 
                 gt_segments,
-                per_segment=False  # Changed to False - no per-segment in individual reports
+                confidence_scores=confidence_scores,
+                per_segment=True  # We need this to extract per-segment for aggregation
             )
             
-            # Print report to terminal
-            print("\n" + "="*70)
-            print(f"EVALUATION RESULTS FOR: {os.path.basename(test_file)}")
-            print("="*70)
-            evaluator.print_report(results, show_per_segment=False)  # Changed to False
-            print("="*70)
-            
-            # Write to combined report file
-            combined_report.write("\n" + "="*70 + "\n")
-            combined_report.write(f"TEST FILE {idx+1}/{len(test_files)}: {os.path.basename(test_file)}\n")
-            combined_report.write("="*70 + "\n")
-            write_evaluation_to_file(combined_report, results, evaluator, show_per_segment=False)  # Changed to False
-            combined_report.write("\n")
-            
-            # Also save individual report
-            individual_report_path = os.path.join(
-                output_dir,
-                f'eval_report_{idx}_{os.path.splitext(os.path.basename(test_file))[0]}.txt'
-            )
-            with open(individual_report_path, 'w') as ind_report:
-                ind_report.write("="*70 + "\n")
-                ind_report.write(f"EVALUATION REPORT: {os.path.basename(test_file)}\n")
-                ind_report.write("="*70 + "\n")
-                ind_report.write(f"Model: {model_name}\n")
-                ind_report.write(f"Predicted file: {saved_annotated}\n")
-                ind_report.write(f"Ground truth file: {test_file}\n")
-                ind_report.write("="*70 + "\n\n")
-                write_evaluation_to_file(ind_report, results, evaluator, show_per_segment=False)  # Changed to False
-            
-            print(f"✓ Saved individual report -> {individual_report_path}")
+            print(f"✓ Evaluation complete")
             
             # Store results
             all_results.append({
                 'file': test_file,
                 'results': results,
                 'pred_segments': pred_segments,
-                'gt_segments': gt_segments
+                'gt_segments': gt_segments,
+                'confidence_scores': confidence_scores
             })
             
             # Step 6: Visualize timeline
@@ -429,7 +351,7 @@ def run_quick_test(train_files, test_files, visualize=True, use_existing_model=F
                     )
                     plt.savefig(viz_file, dpi=150, bbox_inches='tight')
                     print(f"✓ Saved visualization -> {viz_file}")
-                    plt.show()
+                    plt.close()
                     
                 except Exception as vis_err:
                     print(f"Visualization error: {vis_err}")
@@ -445,138 +367,252 @@ def run_quick_test(train_files, test_files, visualize=True, use_existing_model=F
         if os.path.exists(annotated_output):
             os.remove(annotated_output)
     
-    # Summary
+    # Summary - consolidated by activity
     print(f"\n{'='*70}")
-    print("SUMMARY - ALL TEST FILES")
+    print("CONSOLIDATED EVALUATION BY ACTIVITY (ALL TEST FILES)")
     print(f"{'='*70}")
     
     if all_results:
-        print(f"\n{'File':<40} {'F1':>8} {'Precision':>10} {'Recall':>8}")
-        print("-"*70)
-        
-        for item in all_results:
-            results = item['results']
-            filename = os.path.basename(item['file'])
-            print(f"{filename:<40} {results['f1_score']:>8.4f} "
-                  f"{results['precision']:>10.4f} {results['recall']:>8.4f}")
-        
-        # Overall average
-        avg_f1 = sum(r['results']['f1_score'] for r in all_results) / len(all_results)
-        avg_precision = sum(r['results']['precision'] for r in all_results) / len(all_results)
-        avg_recall = sum(r['results']['recall'] for r in all_results) / len(all_results)
-        
-        print("-"*70)
-        print(f"{'AVERAGE':<40} {avg_f1:>8.4f} {avg_precision:>10.4f} {avg_recall:>8.4f}")
-        
         # Aggregate per-segment metrics across all files
-        print(f"\n{'='*70}")
-        print("AGGREGATED PER-SEGMENT METRICS (ALL TEST FILES)")
-        print(f"{'='*70}")
-        
-        # Collect all segments across all files
         aggregated_segments = {}
         
         for item in all_results:
-            if 'per_segment_metrics' in item['results']:
-                per_seg = item['results']['per_segment_metrics']
+            pred_segs = item['pred_segments']
+            gt_segs = item['gt_segments']
+            
+            # Get confidence scores for this file if available
+            file_confidence_scores = item.get('confidence_scores', None)
+            
+            # Initialize aggregated segments
+            for seg_id in range(1, 9):
+                seg_id_str = str(seg_id)
+                
+                if seg_id_str not in aggregated_segments:
+                    aggregated_segments[seg_id_str] = {
+                        'total_predicted': 0,
+                        'total_ground_truth': 0,
+                        'true_positives': 0,
+                        'false_positives': 0,
+                        'false_negatives': 0,
+                        'start_errors': [],
+                        'end_errors': [],
+                        'duration_errors': [],
+                        'confidence_scores': [],
+                        'prediction_labels': [],
+                    }
+                
+                # Count predicted segments for this ID
+                pred_count = len([s for s in pred_segs if s.get('segment_id') == seg_id_str])
+                gt_count = len([s for s in gt_segs if s.get('segment_id') == seg_id_str])
+                
+                aggregated_segments[seg_id_str]['total_predicted'] += pred_count
+                aggregated_segments[seg_id_str]['total_ground_truth'] += gt_count
+                
+            # Calculate TP, FP, FN from the per_segment_metrics
+            results = item['results']
+            if 'per_segment_metrics' in results:
+                per_seg = results['per_segment_metrics']
                 for seg_id, metrics in per_seg.items():
                     if seg_id not in aggregated_segments:
-                        aggregated_segments[seg_id] = {
-                            'total_predicted': 0,
-                            'total_ground_truth': 0,
-                            'detected': 0,
-                            'too_early': 0,
-                            'false_positive': 0,
-                            'false_negative': 0,
-                            'too_late': 0,
-                            'true_negative': 0,
-                            'start_errors': [],
-                            'end_errors': [],
-                            'duration_errors': [],
-                            'within_tolerance_count': 0,
-                            'total_matched': 0
-                        }
-                    
+                        continue
+                        
                     agg = aggregated_segments[seg_id]
-                    agg['total_predicted'] += metrics['num_predicted']
-                    agg['total_ground_truth'] += metrics['num_ground_truth']
+                    
+                    num_pred = metrics['num_predicted']
+                    num_gt = metrics['num_ground_truth']
+                    
+                    # Collect confidence scores for this specific segment instance
+                    if file_confidence_scores:
+                        file_pred_segs_for_activity = [s for s in pred_segs if s.get('segment_id') == seg_id]
+                        for pred_seg in file_pred_segs_for_activity:
+                            # Find the index of this segment in the original pred_segs list
+                            try:
+                                seg_idx = pred_segs.index(pred_seg)
+                                if seg_idx < len(file_confidence_scores):
+                                    conf = file_confidence_scores[seg_idx]
+                                    
+                                    # Determine if this specific prediction is TP or FP based on metrics
+                                    if metrics['detected'] and num_pred > 0:
+                                        # First prediction is TP, rest are FP
+                                        is_first = (file_pred_segs_for_activity.index(pred_seg) == 0)
+                                        is_tp = is_first
+                                    else:
+                                        # Not detected, so all predictions are FP
+                                        is_tp = False
+                                    
+                                    agg['confidence_scores'].append(conf)
+                                    agg['prediction_labels'].append(1 if is_tp else 0)
+                            except (ValueError, IndexError):
+                                pass
                     
                     if metrics['detected']:
-                        agg['detected'] += 1
-                        if metrics.get('too_early'):
-                            agg['too_early'] += 1
-                    if metrics['false_positive']:
-                        agg['false_positive'] += 1
-                    if metrics['false_negative']:
-                        agg['false_negative'] += 1
-                        if metrics.get('too_late'):
-                            agg['too_late'] += 1
-                    if metrics.get('true_negative'):
-                        agg['true_negative'] += 1
-                    
+                        # Successfully detected (already within start_threshold)
+                        agg['true_positives'] += 1
+                        
+                        # Extra predictions beyond the first match
+                        if num_pred > 1:
+                            agg['false_positives'] += (num_pred - 1)
+                        if num_gt > 1:
+                            agg['false_negatives'] += (num_gt - 1)
+        
+                    elif metrics.get('false_positive'):
+                        agg['false_positives'] += num_pred
+                        
+                    elif metrics.get('false_negative'):
+                        agg['false_negatives'] += num_gt
+                        
+                        if num_pred > 0:
+                            agg['false_positives'] += num_pred
+
                     # Collect timing errors
                     if metrics['start_error'] is not None:
                         agg['start_errors'].append(metrics['start_error'])
-                        agg['end_errors'].append(metrics['end_error'])
-                        agg['duration_errors'].append(metrics['duration_error'])
-                        agg['total_matched'] += 1
-                        if metrics['within_tolerance']:
-                            agg['within_tolerance_count'] += 1
-        
-        # Write aggregated report to combined file
-        combined_report.write("\n" + "="*70 + "\n")
-        combined_report.write("AGGREGATED PER-SEGMENT METRICS (ALL TEST FILES)\n")
-        combined_report.write("="*70 + "\n")
-        
-        for seg_id in sorted(aggregated_segments.keys()):
-            agg = aggregated_segments[seg_id]
+                        if metrics['end_error'] is not None:
+                            agg['end_errors'].append(metrics['end_error'])
+                        if metrics['duration_error'] is not None:
+                            agg['duration_errors'].append(metrics['duration_error'])
+                        
+        # Write consolidated report
+        report_path = os.path.join(output_dir, 'evaluation_by_activity.txt')
+        with open(report_path, 'w') as report_file:
+            report_file.write("="*70 + "\n")
+            report_file.write("EVALUATION BY ACTIVITY (CONSOLIDATED ACROSS ALL TEST FILES)\n")
+            report_file.write("="*70 + "\n")
+            report_file.write(f"Model: {model_name}\n")
+            report_file.write(f"Training files: {len(train_files)} (filtered)\n")
+            report_file.write(f"Test files: {len(test_files)} (unfiltered)\n")
+            report_file.write(f"Start time threshold: {evaluator.start_threshold}s\n")
+            report_file.write("="*70 + "\n\n")
             
-            # Print to terminal
-            print(f"\n--- Segment ID: {seg_id} ---")
-            print(f"  Total Predicted:     {agg['total_predicted']}")
-            print(f"  Total Ground Truth:  {agg['total_ground_truth']}")
-            print(f"  Detected:            {agg['detected']}")
-            print(f"  False Positives:     {agg['false_positive']}")
-            print(f"  False Negatives:     {agg['false_negative']}")
+            # Prepare for combined ROC plot
+            from sklearn.metrics import roc_auc_score, roc_curve
+            import numpy as np
             
-            # Write to file
-            combined_report.write(f"\n--- Segment ID: {seg_id} ---\n")
-            combined_report.write(f"  Total Predicted:     {agg['total_predicted']}\n")
-            combined_report.write(f"  Total Ground Truth:  {agg['total_ground_truth']}\n")
-            combined_report.write(f"  Detected:            {agg['detected']}\n")
-            combined_report.write(f"  False Positives:     {agg['false_positive']}\n")
-            combined_report.write(f"  False Negatives:     {agg['false_negative']}\n")
+            fig_combined, ax_combined = plt.subplots(figsize=(10, 8))
+            colors = plt.cm.tab10(np.linspace(0, 1, 8))
             
-            if agg['start_errors']:
-                import numpy as np
-                mean_start = np.mean(agg['start_errors'])
-                mean_end = np.mean(agg['end_errors'])
-                mean_duration = np.mean(agg['duration_errors'])
-                std_start = np.std(agg['start_errors'])
-                total_matched = len(agg['start_errors'])
+            for seg_id in sorted(aggregated_segments.keys()):
+                agg = aggregated_segments[seg_id]
                 
-                print(f"  Start Error (mean):  {mean_start:.4f}s (±{std_start:.4f}s)")
-                print(f"  End Error (mean):    {mean_end:.4f}s")
-                print(f"  Duration Err (mean): {mean_duration:.4f}s")
-                print(f"  Within Tolerance:    {agg['within_tolerance_count']}/{total_matched}")
+                # Calculate per-segment AUC if we have confidence scores
+                seg_auc = None
+                fpr_seg = None
+                tpr_seg = None
                 
-                combined_report.write(f"  Start Error (mean):  {mean_start:.4f}s (±{std_start:.4f}s)\n")
-                combined_report.write(f"  End Error (mean):    {mean_end:.4f}s\n")
-                combined_report.write(f"  Duration Err (mean): {mean_duration:.4f}s\n")
-                combined_report.write(f"  Within Tolerance:    {agg['within_tolerance_count']}/{total_matched}\n")
+                if agg['confidence_scores'] and agg['prediction_labels']:
+                    try:
+                        y_true = np.array(agg['prediction_labels'])
+                        y_scores = np.array(agg['confidence_scores'])
+                        
+                        print(f"  Debug Activity {seg_id}: {len(y_true)} predictions, {sum(y_true)} TPs, {len(y_true)-sum(y_true)} FPs")
+                        print(f"  Debug Activity {seg_id}: {len(np.unique(y_scores))} unique confidence values, {len(np.unique(y_true))} unique labels")
+                        
+                        # Only calculate if we have varied scores and both classes
+                        if len(np.unique(y_scores)) > 1 and len(np.unique(y_true)) > 1:
+                            seg_auc = roc_auc_score(y_true, y_scores)
+                            
+                            # Calculate ROC curve for plotting
+                            fpr_seg, tpr_seg, thresholds = roc_curve(y_true, y_scores)
+                            
+                            # Add to combined plot
+                            seg_idx = int(seg_id) - 1
+                            ax_combined.plot(fpr_seg, tpr_seg, color=colors[seg_idx], lw=2,
+                                           label=f'Activity {seg_id} (AUC = {seg_auc:.3f})')
+                            print(f"  Debug Activity {seg_id}: ✓ ROC/AUC calculated successfully: {seg_auc:.4f}")
+                        else:
+                            if len(np.unique(y_true)) == 1:
+                                print(f"  Debug Activity {seg_id}: ✗ Only one class present (all {y_true[0]}s)")
+                            else:
+                                print(f"  Debug Activity {seg_id}: ✗ All confidence scores identical")
+                            
+                    except Exception as e:
+                        print(f"  Warning: Could not calculate AUC for activity {seg_id}: {e}")
+                else:
+                    print(f"  Debug Activity {seg_id}: ✗ No confidence scores available")
+                
+                # Calculate precision, recall, F1 for this activity
+                tp = agg['true_positives']
+                fp = agg['false_positives']
+                fn = agg['false_negatives']
+                
+                precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+                recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+                f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
+                
+                # Print to terminal
+                print(f"\n--- Activity {seg_id} ---")
+                print(f"  Total Predicted:     {agg['total_predicted']}")
+                print(f"  Total Ground Truth:  {agg['total_ground_truth']}")
+                print(f"  True Positives:      {tp}")
+                print(f"  False Positives:     {fp}")
+                print(f"  False Negatives:     {fn}")
+                print(f"  Precision:           {precision:.4f}")
+                print(f"  Recall:              {recall:.4f}")
+                print(f"  F1 Score:            {f1:.4f}")
+                if seg_auc is not None:
+                    print(f"  AUC:                 {seg_auc:.4f}")
+                
+                # Write to file
+                report_file.write(f"\n--- Activity {seg_id} ---\n")
+                report_file.write(f"  Total Predicted:     {agg['total_predicted']}\n")
+                report_file.write(f"  Total Ground Truth:  {agg['total_ground_truth']}\n")
+                report_file.write(f"  True Positives:      {tp}\n")
+                report_file.write(f"  False Positives:     {fp}\n")
+                report_file.write(f"  False Negatives:     {fn}\n")
+                report_file.write(f"  Precision:           {precision:.4f}\n")
+                report_file.write(f"  Recall:              {recall:.4f}\n")
+                report_file.write(f"  F1 Score:            {f1:.4f}\n")
+                if seg_auc is not None:
+                    report_file.write(f"  AUC:                 {seg_auc:.4f}\n")
+                
+                if agg['start_errors']:
+                    # Filter out None values
+                    start_errs = [e for e in agg['start_errors'] if e is not None]
+                    end_errs = [e for e in agg['end_errors'] if e is not None]
+                    dur_errs = [e for e in agg['duration_errors'] if e is not None]
+                    
+                    if start_errs:
+                        mean_start = np.mean(start_errs)
+                        std_start = np.std(start_errs)
+                        total_matched = len(start_errs)
+                        
+                        print(f"  Start Error (mean):  {mean_start:.4f}s (±{std_start:.4f}s)")
+                        report_file.write(f"  Start Error (mean):  {mean_start:.4f}s (±{std_start:.4f}s)\n")
+                    
+                    if end_errs:
+                        mean_end = np.mean(end_errs)
+                        print(f"  End Error (mean):    {mean_end:.4f}s")
+                        report_file.write(f"  End Error (mean):    {mean_end:.4f}s\n")
+                    
+                    if dur_errs:
+                        mean_duration = np.mean(dur_errs)
+                        print(f"  Duration Err (mean): {mean_duration:.4f}s")
+                        report_file.write(f"  Duration Err (mean): {mean_duration:.4f}s\n")
+                            
+            print(f"{'='*70}")
+            report_file.write("="*70 + "\n")
+            
+            # Finalize and save combined ROC plot
+            ax_combined.plot([0, 1], [0, 1], color='gray', lw=2, linestyle='--', 
+                            label='Random classifier', alpha=0.5)
+            ax_combined.set_xlim([0.0, 1.0])
+            ax_combined.set_ylim([0.0, 1.05])
+            ax_combined.set_xlabel('False Positive Rate', fontsize=12)
+            ax_combined.set_ylabel('True Positive Rate', fontsize=12)
+            ax_combined.set_title('ROC Curves by Activity (Aggregated)', fontsize=14, fontweight='bold')
+            ax_combined.legend(loc="lower right", fontsize=9)
+            ax_combined.grid(alpha=0.3)
+            plt.tight_layout()
+            
+            combined_roc_file = os.path.join(output_dir, 'roc_by_activity.png')
+            plt.savefig(combined_roc_file, dpi=150, bbox_inches='tight')
+            plt.close()
+            print(f"\n✓ Saved ROC curve by activity -> {combined_roc_file}")
         
-        print(f"{'='*70}")
-        combined_report.write("="*70 + "\n")
+        print(f"✓ Saved consolidated report -> {report_path}")
     
     else:
         print("\nNo results to summarize. Check errors above.")
-    
-    # Close combined report at the very end
-    combined_report.write("\n" + "="*70 + "\n")
-    combined_report.write("END OF EVALUATION REPORT\n")
-    combined_report.write("="*70 + "\n")
-    combined_report.close()
-    print(f"\n✓ Saved combined report -> {combined_report_path}")
     
     # Cleanup temp directory
     print("\nCleaning up temporary files...")
@@ -585,7 +621,7 @@ def run_quick_test(train_files, test_files, visualize=True, use_existing_model=F
     return all_results
 
 
-def get_matching_unfiltered_file(filtered_file, unfiltered_dir='./data'):
+def get_matching_unfiltered_file(filtered_file, unfiltered_dir='./data_spaces'):
     """
     Find the corresponding unfiltered file for a filtered file
     
@@ -602,7 +638,7 @@ def get_matching_unfiltered_file(filtered_file, unfiltered_dir='./data'):
     if os.path.exists(unfiltered_path):
         return unfiltered_path
     else:
-        print(f"WARNING: Could not find unfiltered file: {unfiltered_path}")
+        # File doesn't exist - this is expected if not all files are in both dirs
         return None
 
 
@@ -613,8 +649,21 @@ def main():
     filtered_data_dir = './data_filtered'  # For training
     unfiltered_data_dir = './data_spaces'  # For testing
     model_name = 'quick_test_model'
+    start_error_threshold = 15.0  # Define the threshold here
     
-    # Get all filtered data files for training
+    # Create timestamped output directory with descriptive name
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    
+    # Extract the last part of the filtered_data_dir for the folder name
+    filtered_dir_name = os.path.basename(os.path.normpath(filtered_data_dir))
+    
+    # Create descriptive folder name: timestamp_filtereddir_threshold
+    output_dir_name = f'run_{timestamp}_{filtered_dir_name}_thresh{int(start_error_threshold)}s'
+    output_dir = os.path.join('./output', output_dir_name)
+    os.makedirs(output_dir, exist_ok=True)
+    print(f"Output directory: {output_dir}")
+    
+    # Get all filtered data files for training (use ALL of them)
     filtered_files = [
         os.path.join(filtered_data_dir, f) 
         for f in os.listdir(filtered_data_dir) 
@@ -623,26 +672,66 @@ def main():
     
     print(f"Found {len(filtered_files)} filtered files in {filtered_data_dir}")
     
-    if len(filtered_files) < 23:
-        print(f"ERROR: Need at least 23 files (20 train + 3 test), found {len(filtered_files)}")
+    if len(filtered_files) == 0:
+        print(f"ERROR: No filtered files found in {filtered_data_dir}")
         return
     
-    # Shuffle files
+    # Shuffle filtered files for training
     random.shuffle(filtered_files)
     
-    # Split filtered files for training
-    train_files = filtered_files[:20]
-    test_filtered_files = filtered_files[20:23]
+    split_index = int(len(filtered_files) * 0.7)
+    train_files = filtered_files[:split_index]
+    test_candidate_files = filtered_files[split_index:]
+
+    print(f"Split: {len(train_files)} training files (70%), {len(test_candidate_files)} test candidates (30%)")
     
     # Get corresponding unfiltered files for testing
+    # Only use unfiltered files that have a match in filtered
     test_files = []
-    for filtered_file in test_filtered_files:
+    for filtered_file in test_candidate_files:
         unfiltered_file = get_matching_unfiltered_file(filtered_file, unfiltered_data_dir)
         if unfiltered_file:
             test_files.append(unfiltered_file)
     
+    # If we don't have enough test files from the split, try to find more
+    if len(test_files) < 3:
+        print(f"Warning: Only found {len(test_files)} matching test files from the split.")
+        print("Looking for additional matching files...")
+        
+        # Get all unfiltered files
+        all_unfiltered = [
+            os.path.join(unfiltered_data_dir, f)
+            for f in os.listdir(unfiltered_data_dir)
+            if f.endswith('.txt')
+        ]
+        
+        # Find which ones have matches in filtered (but weren't used for training)
+        train_basenames = {os.path.basename(f) for f in train_files}
+        
+        for unfiltered_file in all_unfiltered:
+            basename = os.path.basename(unfiltered_file)
+            # Check if this file exists in filtered AND wasn't used for training
+            filtered_match = os.path.join(filtered_data_dir, basename)
+            if os.path.exists(filtered_match) and basename not in train_basenames:
+                if unfiltered_file not in test_files:
+                    test_files.append(unfiltered_file)
+                    if len(test_files) >= 3:
+                        break
+    
     if len(test_files) == 0:
         print(f"ERROR: Could not find any unfiltered test files in {unfiltered_data_dir}")
+        print(f"       that have matching filtered files in {filtered_data_dir}")
+        
+        # Show what we have
+        print(f"\nSample filtered files:")
+        for f in filtered_files[:5]:
+            print(f"  - {os.path.basename(f)}")
+        
+        print(f"\nSample unfiltered files:")
+        unfiltered_samples = [f for f in os.listdir(unfiltered_data_dir) if f.endswith('.txt')][:5]
+        for f in unfiltered_samples:
+            print(f"  - {f}")
+        
         return
     
     print(f"\n{'='*70}")
@@ -650,6 +739,7 @@ def main():
     print(f"{'='*70}")
     print(f"Training on: {len(train_files)} FILTERED files from {filtered_data_dir}")
     print(f"Testing on: {len(test_files)} UNFILTERED files from {unfiltered_data_dir}")
+    print(f"Start error threshold: {start_error_threshold}s")
     
     # Check if model already exists
     model_exists = check_existing_model(model_name)
@@ -688,13 +778,15 @@ def main():
     # Ask about visualization
     visualize = input("\nEnable timeline visualization? (y/n): ").lower().strip() == 'y'
     
-    # Run the test
+    # Run the test - pass the threshold
     results = run_quick_test(
         train_files, 
         test_files, 
+        output_dir,
         visualize=visualize,
         use_existing_model=use_existing,
-        model_name=model_name
+        model_name=model_name,
+        start_error_threshold=start_error_threshold  # Pass threshold here
     )
     
     print(f"\n{'='*70}")
@@ -702,8 +794,8 @@ def main():
     print(f"{'='*70}")
     
     # Show what files were generated
-    print("\nGenerated files in ./output/:")
-    output_dir = './output'
+    print(f"\nAll outputs saved to: {output_dir}")
+    print("\nGenerated files:")
     if os.path.exists(output_dir):
         generated = sorted(os.listdir(output_dir))
         for f in generated:
