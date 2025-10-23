@@ -34,7 +34,7 @@ class Config:
     def __init__(self):
         """ Constructor
         """
-        self.activitynames = ['1', '2', '3', '4', '5', '6', '7', '8', 'Other_Activity']
+        self.activitynames = ['1', '2', '3', '4', '5', '6', '7', '8']
         self.current_seconds_of_day = 0
         self.current_timestamp = 0
         self.day_of_week = 0
@@ -64,7 +64,7 @@ class Config:
         self.labels = []
         self.numwin = 0
         self.wincnt = 0
-        self.data_filename = "P007.txt"
+        self.data_filename = "data.txt"
         self.filter_other = True  # Do not consider other in performance
         self.ignore_other = False
         self.cluster_other = False

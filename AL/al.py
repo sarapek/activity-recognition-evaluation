@@ -559,10 +559,7 @@ def annotate_data(filename):
         
         # Assign activity label
         if prediction_index < len(predict_alabel):
-            if prediction_index >= len(cf.activitynames) or prediction_index < 0:
-                aname = "Other_Activity"
-            else:
-                aname = cf.activitynames[prediction_index]
+            aname = cf.activitynames[predict_alabel[prediction_index]]
                 
             if aname.startswith("cluster_"):
                 aname = "Other_Activity"

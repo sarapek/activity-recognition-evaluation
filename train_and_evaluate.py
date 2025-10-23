@@ -4,6 +4,9 @@ import subprocess
 import shutil
 import sys
 from datetime import datetime
+import json
+import numpy as np
+from collections import defaultdict
 
 # Add evaluation folder to path
 sys.path.append('./evaluation')
@@ -12,87 +15,129 @@ from segment_evaluator import SegmentEvaluator
 from visualize_segments_timeline import visualize_segments_timeline
 import matplotlib.pyplot as plt
 
-def write_evaluation_to_file(file_handle, results, evaluator, show_per_segment=True):
-    """Write evaluation results to a file in the same format as print_report"""
-    file_handle.write("="*60 + "\n")
-    file_handle.write("SEGMENT EVALUATION REPORT\n")
-    file_handle.write("="*60 + "\n")
-    file_handle.write(f"Start Time Threshold: {evaluator.start_threshold}s\n")
-    
-    file_handle.write("\n--- Detection Metrics (Segment-Based) ---\n")
-    file_handle.write(f"F1 Score:         {results['f1_score']:.4f}\n")
-    file_handle.write(f"Precision:        {results['precision']:.4f}\n")
-    file_handle.write(f"Recall (TPR):     {results['recall']:.4f}\n")
-    file_handle.write(f"FPR:              {results['fpr']:.4f}\n")
-    auc_val = results.get('auc')
-    if auc_val is not None:
-        file_handle.write(f"AUC:              {auc_val:.4f}\n")
+def convert_to_json_serializable(obj):
+    """Convert numpy types to native Python types for JSON serialization"""
+    if isinstance(obj, dict):
+        return {key: convert_to_json_serializable(value) for key, value in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_to_json_serializable(item) for item in obj]
+    elif isinstance(obj, (np.integer, np.int32, np.int64)):
+        return int(obj)
+    elif isinstance(obj, (np.floating, np.float32, np.float64)):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, datetime):
+        return obj.isoformat()
+    elif obj is None or isinstance(obj, (bool, int, float, str)):
+        return obj
     else:
-        file_handle.write(f"AUC:              N/A (no varied confidence scores)\n")
+        return str(obj)
+
+def filter_results_by_activity(results, activity_filter):
+    """Filter evaluation results to only include specified activities AND remove ROC arrays"""
+    filtered_results = {}
     
-    file_handle.write("\n--- Confusion Matrix (Segments) ---\n")
-    file_handle.write(f"True Positives:   {results['true_positives']} segments\n")
-    file_handle.write(f"False Positives:  {results['false_positives']} segments\n")
-    file_handle.write(f"False Negatives:  {results['false_negatives']} segments\n")
-    file_handle.write(f"True Negatives:   {results['true_negatives']} segment IDs\n")
+    # Copy and filter metadata
+    if 'metadata' in results:
+        filtered_results['metadata'] = results['metadata'].copy()
+        # Filter activity_classes in metadata
+        if 'activity_classes' in filtered_results['metadata']:
+            filtered_results['metadata']['activity_classes'] = [
+                ac for ac in filtered_results['metadata']['activity_classes']
+                if ac in activity_filter
+            ]
     
-    file_handle.write("\n--- Temporal Accuracy ---\n")
-    if results['start_errors_mean'] is not None:
-        file_handle.write(f"Start Time Error (mean):     {results['start_errors_mean']:.4f}s\n")
-        file_handle.write(f"Start Time Error (std):      {results['start_errors_std']:.4f}s\n")
-        file_handle.write(f"Start Time Error (max):      {results['start_errors_max']:.4f}s\n")
-        file_handle.write(f"End Time Error (mean):       {results['end_errors_mean']:.4f}s\n")
-        file_handle.write(f"End Time Error (std):        {results['end_errors_std']:.4f}s\n")
-        file_handle.write(f"Duration Error (mean):       {results['duration_errors_mean']:.4f}s\n")
-    else:
-        file_handle.write("No matched segments for temporal analysis\n")
+    # Copy top-level metrics (these are already aggregated across filtered activities)
+    for key in ['macro_avg', 'micro_avg', 'weighted_avg']:
+        if key in results:
+            filtered_results[key] = results[key]
     
-    file_handle.write("\n--- Segment Counts ---\n")
-    file_handle.write(f"Predicted Segments:     {results['true_positives'] + results['false_positives']}\n")
-    file_handle.write(f"Ground Truth Segments:  {results['true_positives'] + results['false_negatives']}\n")
-    file_handle.write(f"Matched Segments:       {results['true_positives']}\n")
-    file_handle.write(f"Missed Segments:        {results['false_negatives']}\n")
-    file_handle.write(f"False Alarm Segments:   {results['false_positives']}\n")
+    # Filter per_class metrics
+    if 'per_class' in results:
+        filtered_results['per_class'] = {
+            activity_id: metrics 
+            for activity_id, metrics in results['per_class'].items()
+            if activity_id in activity_filter
+        }
     
-    if 'per_segment_metrics' in results and show_per_segment:
-        file_handle.write("\n" + "="*60 + "\n")
-        file_handle.write("PER-SEGMENT BREAKDOWN\n")
-        file_handle.write("="*60 + "\n")
+    # Filter frame_level ROC - KEEP ONLY AUC, DROP FPR/TPR/THRESHOLDS
+    if 'frame_level' in results:
+        filtered_results['frame_level'] = {}
+        for activity_id, roc_data in results['frame_level'].items():
+            if activity_id in activity_filter:
+                # Only keep AUC value, drop the arrays
+                filtered_results['frame_level'][activity_id] = {
+                    'auc': roc_data.get('auc')
+                }
+    
+    # Filter segment_level ROC - KEEP ONLY AUC, DROP FPR/TPR/THRESHOLDS
+    if 'segment_level' in results:
+        filtered_results['segment_level'] = {}
+        for activity_id, roc_data in results['segment_level'].items():
+            if activity_id in activity_filter:
+                # Only keep AUC value, drop the arrays
+                filtered_results['segment_level'][activity_id] = {
+                    'auc': roc_data.get('auc')
+                }
+    
+    # Filter per_file_results if they exist
+    if 'per_file_results' in results:
+        filtered_per_file = []
+        for file_result in results['per_file_results']:
+            filtered_file_result = {
+                'pred_file': file_result['pred_file'],
+                'gt_file': file_result['gt_file'],
+                'num_pred_segments': file_result['num_pred_segments'],
+                'num_gt_segments': file_result['num_gt_segments']
+            }
+            
+            # Filter frame_level in per-file results - AUC ONLY
+            if 'frame_level' in file_result:
+                filtered_file_result['frame_level'] = {
+                    activity_id: {'auc': roc_data.get('auc')}
+                    for activity_id, roc_data in file_result['frame_level'].items()
+                    if activity_id in activity_filter
+                }
+            
+            # Filter segment_level in per-file results - AUC ONLY
+            if 'segment_level' in file_result:
+                filtered_file_result['segment_level'] = {
+                    activity_id: {'auc': roc_data.get('auc')}
+                    for activity_id, roc_data in file_result['segment_level'].items()
+                    if activity_id in activity_filter
+                }
+            
+            # Filter metrics in per-file results
+            if 'metrics' in file_result:
+                filtered_file_result['metrics'] = {}
+                for key in ['macro_avg', 'micro_avg', 'weighted_avg']:
+                    if key in file_result['metrics']:
+                        filtered_file_result['metrics'][key] = file_result['metrics'][key]
+                
+                if 'per_class' in file_result['metrics']:
+                    filtered_file_result['metrics']['per_class'] = {
+                        activity_id: metrics
+                        for activity_id, metrics in file_result['metrics']['per_class'].items()
+                        if activity_id in activity_filter
+                    }
+            
+            filtered_per_file.append(filtered_file_result)
         
-        per_seg = results['per_segment_metrics']
-        for seg_id, metrics in sorted(per_seg.items()):
-            file_handle.write(f"\n--- Segment ID: {seg_id} ---\n")
-            file_handle.write(f"  Predicted:     {metrics['num_predicted']}\n")
-            file_handle.write(f"  Ground Truth:  {metrics['num_ground_truth']}\n")
-            file_handle.write(f"  Status:        ")
-            
-            if metrics['detected']:
-                if metrics.get('too_early'):
-                    file_handle.write("DETECTED (TOO EARLY)\n")
-                else:
-                    file_handle.write("DETECTED\n")
-            elif metrics['false_positive']:
-                file_handle.write("FALSE POSITIVE\n")
-            elif metrics['false_negative']:
-                if metrics.get('too_late'):
-                    file_handle.write(f"MISSED (>{evaluator.start_threshold}s LATE)\n")
-                else:
-                    file_handle.write("MISSED\n")
-            else:
-                file_handle.write("TRUE NEGATIVE\n")
-            
-            if metrics['start_error'] is not None:
-                file_handle.write(f"  Start Error:   {metrics['start_error']:.4f}s\n")
-                file_handle.write(f"  End Error:     {metrics['end_error']:.4f}s\n")
-                file_handle.write(f"  Duration Err:  {metrics['duration_error']:.4f}s\n")
+        filtered_results['per_file_results'] = filtered_per_file
     
-    file_handle.write("="*60 + "\n")
+    return filtered_results
 
 def clear_annotations(input_file, output_file):
-    """Remove the last column (activity label) from each line"""
-    with open(input_file, 'r') as f_in, open(output_file, 'w') as f_out:
+    """Remove the last column (activity label) from each line and strip BOM"""
+    with open(input_file, 'r', encoding='utf-8-sig') as f_in, \
+         open(output_file, 'w', encoding='utf-8') as f_out:
         for line in f_in:
-            words = line.strip().split()
+            line = line.strip()
+            if not line:  # Skip empty lines
+                continue
+                
+            words = line.split()
             if len(words) >= 5:
                 # Keep only first 4 fields: date, time, sensor, status
                 new_line = ' '.join(words[:4]) + '\n'
@@ -104,109 +149,594 @@ def clear_annotations(input_file, output_file):
 
 def check_existing_model(model_name='quick_test_model'):
     """Check if a trained model already exists"""
-    model_path = os.path.join('./AL/model', f'{model_name}.pkl.gz')
+    model_path = os.path.join('./model', f'{model_name}.pkl.gz')
     return os.path.exists(model_path)
 
-def run_quick_test(train_files, test_files, output_dir, visualize=True, 
-                   use_existing_model=False, model_name='quick_test_model',
-                   start_error_threshold=15.0):
+def count_activity_instances(file_path, evaluator, activity_ids=['1','2','3','4','5','6','7','8']):
+    """Count how many instances of each activity are in a file"""
+    try:
+        df = evaluator.parse_log_file(file_path)
+        segments = evaluator.extract_segments(df)
+        
+        counts = {aid: 0 for aid in activity_ids}
+        for seg in segments:
+            if seg['segment_id'] in activity_ids:
+                counts[seg['segment_id']] += 1
+        
+        return counts
+    except Exception as e:
+        print(f"Warning: Could not count activities in {file_path}: {e}")
+        return {aid: 0 for aid in activity_ids}
+
+def create_stratified_folds(files, evaluator, n_folds=5, activity_ids=['1','2','3','4','5','6','7','8'], random_seed=42):
     """
-    Quick test: Train on filtered files, test on unfiltered files
+    Create stratified k-folds based on activity presence
     
-    Args:
-        train_files: List of file paths for training (from filtered data)
-        test_files: List of file paths for testing (from unfiltered data)
-        output_dir: Directory to save outputs
-        visualize: If True, show timeline visualizations
-        use_existing_model: If True, skip training and use existing model
-        model_name: Name of the model to use/create
-        start_error_threshold: Threshold in seconds for start time error
+    Strategy: Ensure each fold has roughly equal representation of files containing each activity
     """
     print(f"\n{'='*70}")
-    print("QUICK TEST MODE - Train on filtered, Test on unfiltered")
+    print(f"CREATING {n_folds}-FOLD STRATIFIED CROSS-VALIDATION SPLITS")
     print(f"{'='*70}")
     
-    if use_existing_model:
-        print(f"Using existing model: {model_name}")
-    else:
-        print(f"Training new model: {model_name}")
-        print(f"Training files (filtered): {len(train_files)}")
+    random.seed(random_seed)
+    np.random.seed(random_seed)
     
-    print(f"Testing files (unfiltered): {len(test_files)}")
+    # Count activities in each file
+    print("\nCounting activity instances in all files...")
+    file_activity_counts = {}
+    for file_path in files:
+        counts = count_activity_instances(file_path, evaluator, activity_ids)
+        file_activity_counts[file_path] = counts
+    
+    # Create activity presence matrix (file x activity binary matrix)
+    # 1 if activity present in file, 0 otherwise
+    file_list = list(file_activity_counts.keys())
+    n_files = len(file_list)
+    
+    # Calculate which activities each file contains
+    file_activity_presence = []
+    for file_path in file_list:
+        presence = tuple(1 if file_activity_counts[file_path][aid] > 0 else 0 
+                        for aid in activity_ids)
+        file_activity_presence.append(presence)
+    
+    # Group files by their activity presence pattern
+    pattern_groups = defaultdict(list)
+    for idx, pattern in enumerate(file_activity_presence):
+        pattern_groups[pattern].append(idx)
+    
+    print(f"\nFound {len(pattern_groups)} unique activity presence patterns")
+    print(f"Pattern examples:")
+    for i, (pattern, indices) in enumerate(list(pattern_groups.items())[:5]):
+        pattern_str = ''.join(str(p) for p in pattern)
+        print(f"  Pattern {pattern_str}: {len(indices)} files")
+    
+    # Initialize folds
+    folds = [[] for _ in range(n_folds)]
+    
+    # Distribute each pattern group across folds
+    for pattern, indices in pattern_groups.items():
+        # Shuffle this group
+        random.shuffle(indices)
+        
+        # Distribute across folds in round-robin fashion
+        for i, idx in enumerate(indices):
+            fold_num = i % n_folds
+            folds[fold_num].append(file_list[idx])
+    
+    # Print fold statistics
+    print(f"\n{'='*70}")
+    print("FOLD STATISTICS")
+    print(f"{'='*70}")
+    
+    for fold_idx in range(n_folds):
+        print(f"\n--- Fold {fold_idx + 1} ---")
+        print(f"  Number of files: {len(folds[fold_idx])}")
+        
+        # Count total activity instances in this fold
+        fold_activity_counts = {aid: 0 for aid in activity_ids}
+        for file_path in folds[fold_idx]:
+            for aid in activity_ids:
+                fold_activity_counts[aid] += file_activity_counts[file_path][aid]
+        
+        # Print per-activity counts
+        for aid in activity_ids:
+            print(f"  Activity {aid}: {fold_activity_counts[aid]} instances")
+    
+    # Print overall distribution
+    print(f"\n{'='*70}")
+    print("OVERALL ACTIVITY DISTRIBUTION CHECK")
+    print(f"{'='*70}")
+    
+    total_counts = {aid: 0 for aid in activity_ids}
+    for file_path in file_list:
+        for aid in activity_ids:
+            total_counts[aid] += file_activity_counts[file_path][aid]
+    
+    print(f"\n{'Activity':<12} {'Total':>8} {'Per Fold Avg':>15} {'Min':>8} {'Max':>8} {'Std':>8}")
+    print("-"*70)
+    
+    for aid in activity_ids:
+        fold_counts = []
+        for fold_idx in range(n_folds):
+            count = sum(file_activity_counts[f][aid] for f in folds[fold_idx])
+            fold_counts.append(count)
+        
+        total = total_counts[aid]
+        avg = np.mean(fold_counts)
+        min_count = np.min(fold_counts)
+        max_count = np.max(fold_counts)
+        std = np.std(fold_counts)
+        
+        print(f"{aid:<12} {total:>8} {avg:>15.1f} {min_count:>8} {max_count:>8} {std:>8.2f}")
+    
+    print(f"{'='*70}\n")
+    
+    return folds, file_activity_counts
+
+def add_realistic_confidence_scores(gt_file, output_file, 
+                                              error_rate=0.10):
+    """
+    Add uniformly distributed confidence scores (0.0-1.0) with errors for ROC validation
+    
+    This creates smooth ROC curves with many points to properly test ROC calculation.
+    
+    Args:
+        error_rate: Fraction of predictions to make incorrect (0.10 = 10% errors)
+    """
+    import random
+    random.seed(42)
+        
+    # Possible activities for wrong predictions
+    activities = ['1', '2', '3', '4', '5', '6', '7', '8']
+    
+    lines_read = 0
+    lines_written = 0
+    confidence_values = []
+    errors_introduced = 0
+    
+    try:
+        with open(gt_file, 'r', encoding='utf-8-sig') as f_in, \
+             open(output_file, 'w', encoding='utf-8') as f_out:
+            for line in f_in:
+                lines_read += 1
+                line = line.strip()
+                if not line:
+                    continue
+                
+                parts = line.split()
+                
+                if len(parts) >= 5:
+                    # Decide if this should be an error
+                    is_error = random.random() < error_rate
+                    
+                    if is_error:
+                        # Change activity to wrong one
+                        correct_activity = parts[4]
+                        wrong_activities = [a for a in activities if a != correct_activity]
+                        if wrong_activities:
+                            parts[4] = random.choice(wrong_activities)
+                            errors_introduced += 1
+                        
+                        # Errors get LOW uniform confidence (0.0-0.5)
+                        confidence = random.uniform(0.0, 0.5)
+                    else:
+                        # Correct predictions get HIGH uniform confidence (0.5-1.0)
+                        confidence = random.uniform(0.5, 1.0)
+                    
+                    confidence_values.append(confidence)
+                    
+                    # Output format: date time sensor sensor status activity confidence
+                    new_line = f"{parts[0]} {parts[1]} {parts[2]} {parts[2]} {parts[3]} {parts[4]} {confidence:.4f}\n"
+                    f_out.write(new_line)
+                    lines_written += 1                
+                    
+    except Exception as e:
+        print(f"    ERROR in add_uniform_confidence_scores_with_noise: {e}")
+        import traceback
+        traceback.print_exc()
+
+def run_fold_validation_only(fold_idx, train_files, test_files, output_dir, 
+                              evaluator, activity_filter):
+    """
+    Run evaluation WITHOUT training - with synthetic confidence scores
+    """
+    print(f"\n{'='*70}")
+    print(f"FOLD {fold_idx + 1} - VALIDATION MODE (WITH CONFIDENCE SCORES)")
+    print(f"{'='*70}")
+    print(f"Test files: {len(test_files)}")
+    
+    # Create temp directory for files with confidence scores
+    temp_dir = './temp_validation'
+    os.makedirs(temp_dir, exist_ok=True)
+    print(f"Temp directory: {temp_dir}")
+    
+    predicted_files = []
+    ground_truth_files = []
+    
+    for idx, test_file in enumerate(test_files):
+        print(f"\n  Processing file {idx + 1}/{len(test_files)}: {os.path.basename(test_file)}")
+        
+        # Create prediction file with varying confidence scores
+        pred_file = os.path.join(temp_dir, f'pred_with_conf_{idx}.txt')
+        add_realistic_confidence_scores(test_file, pred_file, error_rate=0.50)
+        
+        # Verify the file was created and has the right format
+        if os.path.exists(pred_file):
+            with open(pred_file, 'r') as f:
+                first_line = f.readline().strip()
+                parts = first_line.split()
+                print(f"    First line parts: {len(parts)}")
+                if len(parts) >= 6:
+                    print(f"    Has confidence column: YES (value: {parts[-1]})")
+                else:
+                    print(f"    Has confidence column: NO")
+        
+        predicted_files.append(pred_file)
+        ground_truth_files.append(test_file)
+    
+    print(f"\n[VALIDATION MODE] Created {len(predicted_files)} prediction files")
+    print("Confidence scores: 0.85-1.0 (varying)")
+    print("Expected: Precision ~= 1.0, Recall ~= 1.0, AUC ~= 0.95-1.0")
+    
+    # Evaluate
+    print(f"\nEvaluating fold {fold_idx + 1}...")
+    
+    multi_results = evaluator.evaluate_multiple_files(predicted_files, ground_truth_files)
+    
+    # Check what we got back
+    print("\nDEBUG: Evaluation completed")
+    print(f"  Results keys: {multi_results.keys()}")
+    
+    if 'frame_level' in multi_results:
+        print(f"  Frame-level activities: {list(multi_results['frame_level'].keys())}")
+        for activity_id in activity_filter:
+            if activity_id in multi_results['frame_level']:
+                auc = multi_results['frame_level'][activity_id].get('auc')
+                print(f"    Activity {activity_id} frame AUC: {auc}")
+    
+    if 'segment_level' in multi_results:
+        print(f"  Segment-level activities: {list(multi_results['segment_level'].keys())}")
+        for activity_id in activity_filter:
+            if activity_id in multi_results['segment_level']:
+                auc = multi_results['segment_level'][activity_id].get('auc')
+                print(f"    Activity {activity_id} segment AUC: {auc}")
+    
+    # Generate ROC curves
+    print(f"\nGenerating ROC curves for fold {fold_idx + 1}...")
+    roc_plot_path = os.path.join(output_dir, f'roc_fold{fold_idx + 1}_validation.png')
+    print(f"  Output path: {roc_plot_path}")
+    
+    try:
+        evaluator.plot_dual_roc_curves(
+            multi_results,
+            save_path=roc_plot_path,
+            activity_filter=activity_filter
+        )
+        
+        # Verify file was created
+        if os.path.exists(roc_plot_path):
+            file_size = os.path.getsize(roc_plot_path)
+            print(f"[OK] ROC curves saved: {roc_plot_path} ({file_size} bytes)")
+        else:
+            print(f"[ERROR] ROC file not created: {roc_plot_path}")
+            
+    except Exception as e:
+        print(f"[ERROR] Failed to generate ROC curves: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    # Don't cleanup temp directory yet so we can inspect files
+    print(f"\nTemp files kept for inspection: {temp_dir}")
+    # shutil.rmtree(temp_dir)
+    
+    return multi_results
+
+def test_file_format(filepath):
+    """Test if a file has the expected format"""
+    print(f"\nTesting file format: {filepath}")
+    
+    if not os.path.exists(filepath):
+        print(f"  ERROR: File does not exist!")
+        return False
+    
+    with open(filepath, 'r', encoding='utf-8-sig') as f:
+        lines = f.readlines()[:10]  # First 10 lines
+    
+    print(f"  Total lines to check: {len(lines)}")
+    
+    for i, line in enumerate(lines):
+        parts = line.strip().split()
+        print(f"  Line {i+1}: {len(parts)} parts")
+        if len(parts) >= 5:
+            print(f"    Format: {parts[0]} {parts[1]} {parts[2]} {parts[3]} {parts[4]}")
+        else:
+            print(f"    WARNING: Not enough parts! Content: {line.strip()}")
+    
+    return True
+
+
+def run_cross_validation_validation_mode(files, output_dir, start_error_threshold, n_folds=5):
+    """
+    Run k-fold validation WITHOUT training - for validating the evaluation pipeline
+    """
+    evaluator = SegmentEvaluator(
+        timeline_resolution_seconds=1.0,
+        start_time_threshold_seconds=start_error_threshold
+    )
+    
+    activity_filter = ['1', '2', '3', '4', '5', '6', '7', '8']
+    
+    # Create stratified folds
+    folds, file_activity_counts = create_stratified_folds(
+        files, evaluator, n_folds=n_folds, activity_ids=activity_filter
+    )
+    
+    # Run each fold
+    all_fold_results = []
+    
+    for fold_idx in range(n_folds):
+        # Get test files for this fold
+        test_file_paths = folds[fold_idx]
+        
+        print(f"\n{'='*70}")
+        print(f"FOLD {fold_idx + 1}/{n_folds} - VALIDATION MODE")
+        print(f"{'='*70}")
+        print(f"Files to validate: {len(test_file_paths)}")
+        
+        # Create fold-specific output directory
+        fold_output_dir = os.path.join(output_dir, f'fold_{fold_idx + 1}')
+        os.makedirs(fold_output_dir, exist_ok=True)
+        print(f"Fold output directory: {fold_output_dir}")
+        
+        # Verify directory was created
+        if not os.path.exists(fold_output_dir):
+            print(f"[ERROR] Could not create fold directory: {fold_output_dir}")
+            continue
+        
+        # Run validation (no training)
+        fold_results = run_fold_validation_only(
+            fold_idx,
+            [],  # No training files needed
+            test_file_paths,
+            fold_output_dir,
+            evaluator,
+            activity_filter
+        )
+        
+        if fold_results is None:
+            print(f"[ERROR] Fold {fold_idx + 1} failed")
+            continue
+        
+        all_fold_results.append(fold_results)
+        
+        # Print fold report
+        print(f"\n{'='*70}")
+        print(f"FOLD {fold_idx + 1} VALIDATION RESULTS")
+        print(f"{'='*70}")
+        evaluator.print_report(fold_results, activity_filter=activity_filter)
+        
+        # Check if results are close to perfect
+        micro_prec = fold_results['micro_avg']['precision']
+        micro_rec = fold_results['micro_avg']['recall']
+        micro_f1 = fold_results['micro_avg']['f1_score']
+        
+        print(f"\n{'='*70}")
+        print("VALIDATION CHECK")
+        print(f"{'='*70}")
+        
+        tolerance = 0.05  # Allow 5% deviation
+        checks = []
+        
+        if micro_prec >= 0.80:
+            print(f"[PASS] Precision: {micro_prec:.4f} (expected >= 0.80)")
+            checks.append(True)
+        else:
+            print(f"[FAIL] Precision: {micro_prec:.4f} (expected >= 0.80)")
+            checks.append(False)
+        
+        if micro_rec >= 0.75:
+            print(f"[PASS] Recall: {micro_rec:.4f} (expected >= 0.75)")
+            checks.append(True)
+        else:
+            print(f"[FAIL] Recall: {micro_rec:.4f} (expected >= 0.75)")
+            checks.append(False)
+        
+        if micro_f1 >= 0.77:
+            print(f"[PASS] F1 Score: {micro_f1:.4f} (expected >= 0.77)")
+            checks.append(True)
+        else:
+            print(f"[FAIL] F1 Score: {micro_f1:.4f} (expected >= 0.77)")
+            checks.append(False)
+        
+        # Check AUC values
+        frame_aucs = []
+        segment_aucs = []
+        
+        for activity_id in activity_filter:
+            if 'frame_level' in fold_results and activity_id in fold_results['frame_level']:
+                auc_val = fold_results['frame_level'][activity_id].get('auc')
+                if auc_val is not None and auc_val > 0:
+                    frame_aucs.append(auc_val)
+            
+            if 'segment_level' in fold_results and activity_id in fold_results['segment_level']:
+                auc_val = fold_results['segment_level'][activity_id].get('auc')
+                if auc_val is not None and auc_val > 0:
+                    segment_aucs.append(auc_val)
+        
+        avg_frame_auc = np.mean(frame_aucs) if frame_aucs else None
+        avg_segment_auc = np.mean(segment_aucs) if segment_aucs else None
+        
+        if avg_frame_auc and avg_frame_auc >= 0.80:
+            print(f"[PASS] Frame AUC: {avg_frame_auc:.4f} (expected >= 0.80)")
+            checks.append(True)
+        elif avg_frame_auc:
+            print(f"[WARN] Frame AUC: {avg_frame_auc:.4f} (expected >= 0.80)")
+            checks.append(False)
+        else:
+            print(f"[FAIL] Frame AUC: Not calculated")
+            checks.append(False)
+        
+        if avg_segment_auc and avg_segment_auc >= 0.85:
+            print(f"[PASS] Segment AUC: {avg_segment_auc:.4f} (expected >= 0.85)")
+            checks.append(True)
+        elif avg_segment_auc:
+            print(f"[WARN] Segment AUC: {avg_segment_auc:.4f} (expected >= 0.85)")
+            checks.append(False)
+        else:
+            print(f"[FAIL] Segment AUC: Not calculated")
+            checks.append(False)
+        
+        if all(checks):
+            print(f"\n[PASS] FOLD {fold_idx + 1}: VALIDATION PASSED")
+        else:
+            print(f"\n[FAIL] FOLD {fold_idx + 1}: VALIDATION FAILED - Check evaluation logic!")
+    
+    # Print summary
+    if len(all_fold_results) > 0:
+        print(f"\n{'='*70}")
+        print("VALIDATION SUMMARY ACROSS ALL FOLDS")
+        print(f"{'='*70}")
+        
+        all_precision = [r['micro_avg']['precision'] for r in all_fold_results]
+        all_recall = [r['micro_avg']['recall'] for r in all_fold_results]
+        all_f1 = [r['micro_avg']['f1_score'] for r in all_fold_results]
+        
+        print(f"\nMicro-averaged metrics across {len(all_fold_results)} folds:")
+        print(f"  Precision: {np.mean(all_precision):.4f} +/- {np.std(all_precision):.4f}")
+        print(f"  Recall:    {np.mean(all_recall):.4f} +/- {np.std(all_recall):.4f}")
+        print(f"  F1 Score:  {np.mean(all_f1):.4f} +/- {np.std(all_f1):.4f}")
+        
+        # Collect AUC values
+        all_frame_aucs = []
+        all_segment_aucs = []
+        
+        for fold_result in all_fold_results:
+            for activity_id in activity_filter:
+                if 'frame_level' in fold_result and activity_id in fold_result['frame_level']:
+                    auc_val = fold_result['frame_level'][activity_id].get('auc')
+                    if auc_val is not None and auc_val > 0:
+                        all_frame_aucs.append(auc_val)
+                
+                if 'segment_level' in fold_result and activity_id in fold_result['segment_level']:
+                    auc_val = fold_result['segment_level'][activity_id].get('auc')
+                    if auc_val is not None and auc_val > 0:
+                        all_segment_aucs.append(auc_val)
+        
+        if all_frame_aucs:
+            print(f"  Frame AUC: {np.mean(all_frame_aucs):.4f} +/- {np.std(all_frame_aucs):.4f}")
+        if all_segment_aucs:
+            print(f"  Segment AUC: {np.mean(all_segment_aucs):.4f} +/- {np.std(all_segment_aucs):.4f}")
+        
+        if (abs(np.mean(all_precision) - 1.0) < 0.05 and 
+            abs(np.mean(all_recall) - 1.0) < 0.05 and
+            abs(np.mean(all_f1) - 1.0) < 0.05):
+            print(f"\n[PASS] OVERALL VALIDATION: PASSED")
+            print("Your evaluation pipeline is working correctly!")
+        else:
+            print(f"\n[FAIL] OVERALL VALIDATION: FAILED")
+            print("There may be issues with your evaluation logic.")
+            print("\nPossible causes:")
+            print("  - Time alignment issues")
+            print("  - Activity ID mismatch")
+            print("  - Segment parsing errors")
+            print("  - Incorrect TP/FP/FN calculations")
+    else:
+        print("\n[ERROR] No folds completed successfully")
+    
+        return all_fold_results
+    
+    # Print summary
+    if len(all_fold_results) > 0:
+        print(f"\n{'='*70}")
+        print("VALIDATION SUMMARY ACROSS ALL FOLDS")
+        print(f"{'='*70}")
+        
+        all_precision = [r['micro_avg']['precision'] for r in all_fold_results]
+        all_recall = [r['micro_avg']['recall'] for r in all_fold_results]
+        all_f1 = [r['micro_avg']['f1_score'] for r in all_fold_results]
+        
+        print(f"\nMicro-averaged metrics across {len(all_fold_results)} folds:")
+        print(f"  Precision: {np.mean(all_precision):.4f} ± {np.std(all_precision):.4f}")
+        print(f"  Recall:    {np.mean(all_recall):.4f} ± {np.std(all_recall):.4f}")
+        print(f"  F1 Score:  {np.mean(all_f1):.4f} ± {np.std(all_f1):.4f}")
+        
+        if (abs(np.mean(all_precision) - 1.0) < 0.05 and 
+            abs(np.mean(all_recall) - 1.0) < 0.05 and
+            abs(np.mean(all_f1) - 1.0) < 0.05):
+            print(f"\n[OK] OVERALL VALIDATION: PASSED")
+            print("Your evaluation pipeline is working correctly!")
+        else:
+            print(f"\n[NOK] OVERALL VALIDATION: FAILED")
+            print("There may be issues with your evaluation logic.")
+            print("\nPossible causes:")
+            print("  - Time alignment issues")
+            print("  - Activity ID mismatch")
+            print("  - Segment parsing errors")
+            print("  - Incorrect TP/FP/FN calculations")
+    
+    return all_fold_results
+
+def run_fold(fold_idx, train_files, test_files, output_dir, model_name,
+             start_error_threshold, evaluator, visualize=False):
+    """
+    Run training and evaluation for a single fold
+    
+    Returns:
+        multi_results: Evaluation results for this fold
+    """
+    print(f"\n{'='*70}")
+    print(f"FOLD {fold_idx + 1} - TRAINING AND EVALUATION")
+    print(f"{'='*70}")
+    print(f"Training files: {len(train_files)}")
+    print(f"Testing files: {len(test_files)}")
     
     # Create temp directory
     temp_dir = './temp'
     os.makedirs(temp_dir, exist_ok=True)
     
-    # Step 1 & 2: Train model (only if not using existing)
-    if not use_existing_model:
-        # Combine training files
-        train_combined = os.path.join(temp_dir, 'quick_test_train.txt')
-        print(f"\nCombining {len(train_files)} training files...")
-        with open(train_combined, 'w') as outfile:
-            for fname in train_files:
-                print(f"  Adding: {fname}")
-                with open(fname, 'r') as infile:
-                    outfile.write(infile.read())
-        
-        # Train the model
-        print("\nTraining model...")
-        cmd = [
-            'python', 
-            './AL/al.py', 
-            '--mode', 'TRAIN', 
-            '--data', train_combined, 
-            '--model', model_name
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True, cwd='.')
-        print(result.stdout)
-        if result.returncode != 0:
-            print("ERROR during training:")
-            print(result.stderr)
-            return None
-        
-        print("✓ Model trained successfully")
-        
-        # Cleanup training file
-        os.remove(train_combined)
-    else:
-        print("\n✓ Using existing trained model")
+    # Train model for this fold
+    train_combined = os.path.join(temp_dir, f'fold_{fold_idx}_train.txt')
+    print(f"\nCombining {len(train_files)} training files...")
+    with open(train_combined, 'w') as outfile:
+        for fname in train_files:
+            with open(fname, 'r') as infile:
+                outfile.write(infile.read())
     
-    # Step 3: Initialize evaluator
-    evaluator = SegmentEvaluator(
-        start_time_threshold_seconds=start_error_threshold
-    )
+    print("\nTraining model...")
+    cmd = [
+        'python', 
+        './AL/al.py', 
+        '--mode', 'TRAIN', 
+        '--data', train_combined, 
+        '--model', model_name,
+        '--ignoreother'
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, cwd='.')
     
-    # Step 4: Process each test file
-    all_results = []
+    if result.returncode != 0:
+        print("ERROR during training:")
+        print(result.stderr)
+        shutil.rmtree(temp_dir)
+        return None
+    
+    print("[OK] Model trained successfully")
+    os.remove(train_combined)
+    
+    # Process test files
+    predicted_files = []
+    ground_truth_files = []
     
     for idx, test_file in enumerate(test_files):
-        print(f"\n{'='*70}")
-        print(f"Processing test file {idx+1}/{len(test_files)}: {os.path.basename(test_file)}")
-        print(f"{'='*70}")
-        
         # Clear annotations
         unannotated_file = os.path.join(temp_dir, f'unannotated_{idx}.txt')
         clear_annotations(test_file, unannotated_file)
-        print(f"✓ Cleared annotations")
         
-        # Check if unannotated file was created
         if not os.path.exists(unannotated_file):
-            print(f"ERROR: Failed to create unannotated file")
             continue
-            
-        # Count lines
-        with open(unannotated_file, 'r') as f:
-            line_count = sum(1 for _ in f)
-        print(f"  Unannotated file has {line_count} lines")
         
-        # Annotate with trained model
-        print("\nAnnotating with trained model...")
-        
-        # The annotated output will be in the current directory as 'data.al'
+        # Annotate
         annotated_output = './data.al'
-        
-        # Remove old annotation file if it exists
         if os.path.exists(annotated_output):
             os.remove(annotated_output)
         
@@ -219,591 +749,527 @@ def run_quick_test(train_files, test_files, output_dir, visualize=True,
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, cwd='.')
         
-        if result.returncode != 0:
-            print("ERROR during annotation:")
-            print(result.stderr)
-            print("\nOutput:")
-            print(result.stdout)
+        if result.returncode != 0 or not os.path.exists(annotated_output):
+            print(f"Warning: Failed to annotate {os.path.basename(test_file)}")
             continue
         
-        print(result.stdout)
-        
-        # Check if annotation file was created
-        if not os.path.exists(annotated_output):
-            print(f"ERROR: Annotation file '{annotated_output}' was not created")
-            print("AL might not have generated predictions. Check the model and data.")
-            continue
-        
-        # Count annotated lines
-        with open(annotated_output, 'r') as f:
-            annotated_line_count = sum(1 for _ in f)
-        print(f"✓ Annotated file created with {annotated_line_count} lines")
-        
-        # Save annotated file for inspection
+        # Save prediction
         saved_annotated = os.path.join(
             output_dir, 
-            f'predicted_{idx}_{os.path.basename(test_file)}'
+            f'fold{fold_idx}_pred_{idx}_{os.path.basename(test_file)}'
         )
         shutil.copy(annotated_output, saved_annotated)
-        print(f"✓ Saved predictions -> {saved_annotated}")
         
-        # Step 5: Evaluate using your SegmentEvaluator
-        print("\nEvaluating predictions...")
+        predicted_files.append(saved_annotated)
+        ground_truth_files.append(test_file)
         
-        try:
-            # Parse both files
-            pred_df = evaluator.parse_log_file(saved_annotated)
-            gt_df = evaluator.parse_log_file(test_file)
-                        
-            # Extract confidence scores if available
-            confidence_scores = None
-            if 'confidence' in pred_df.columns:
-                print("  Confidence column found in predictions")
-                # Group by segment and get mean confidence per segment
-                pred_segments_temp = evaluator.extract_segments(pred_df)
-                confidence_scores = []
-                
-                for seg in pred_segments_temp:
-                    seg_id = seg['segment_id']
-                    seg_start = seg['start_time']
-                    seg_end = seg['end_time']
-                    
-                    # Get confidence scores for events in this segment's time range
-                    # Filter by timestamp and check if annotation matches the segment ID
-                    seg_mask = (pred_df['timestamp'] >= seg_start) & (pred_df['timestamp'] <= seg_end)
-                    seg_df = pred_df[seg_mask]
-                    
-                    # Further filter by activity - extract number from annotation
-                    matching_rows = []
-                    for idx_row, row in seg_df.iterrows():
-                        annotation = str(row['annotation']).strip()
-                        # Extract activity ID from annotation (handles "1", "1.1", "1-start", etc.)
-                        import re
-                        match = re.match(r'^(\d+)', annotation)
-                        if match and match.group(1) == seg_id:
-                            matching_rows.append(row)
-                    
-                    if matching_rows:
-                        # Calculate mean confidence for this segment
-                        confidences = [r['confidence'] for r in matching_rows]
-                        mean_conf = sum(confidences) / len(confidences)
-                        confidence_scores.append(mean_conf)
-                    else:
-                        # No matching events found, use default
-                        confidence_scores.append(0.5)
-                
-                print(f"  Extracted {len(confidence_scores)} confidence scores for {len(pred_segments_temp)} segments")
-                if confidence_scores:
-                    import numpy as np
-                    print(f"  Confidence range: {np.min(confidence_scores):.3f} to {np.max(confidence_scores):.3f}, mean: {np.mean(confidence_scores):.3f}")
-            else:
-                print("  No confidence column found in predictions")
-            
-            # Extract segments
-            pred_segments = evaluator.extract_segments(pred_df)
-            gt_segments = evaluator.extract_segments(gt_df)
-            
-            print(f"  Ground truth segments: {len(gt_segments)}")
-            print(f"  Predicted segments: {len(pred_segments)}")
-            
-            if len(gt_segments) == 0:
-                print("ERROR: No ground truth segments found. Skipping this file.")
-                continue
-            if len(pred_segments) == 0:
-                print("ERROR: No predicted segments found. Skipping this file.")
-                continue
-            
-            # Calculate metrics with confidence scores
-            print("\nCalculating metrics...")
-            results = evaluator.evaluate_segments(
-                pred_segments, 
-                gt_segments,
-                confidence_scores=confidence_scores,
-                per_segment=True  # We need this to extract per-segment for aggregation
-            )
-            
-            print(f"✓ Evaluation complete")
-            
-            # Store results
-            all_results.append({
-                'file': test_file,
-                'results': results,
-                'pred_segments': pred_segments,
-                'gt_segments': gt_segments,
-                'confidence_scores': confidence_scores
-            })
-            
-            # Step 6: Visualize timeline
-            if visualize and len(gt_segments) > 0:
-                print("\nGenerating timeline visualization...")
-                try:
-                    fig, axes = visualize_segments_timeline(
-                        predicted_segments=pred_segments,
-                        ground_truth_segments=gt_segments,
-                        title=f"Timeline: {os.path.basename(test_file)}"
-                    )
-                    plt.tight_layout()
-                    
-                    # Save figure
-                    viz_file = os.path.join(
-                        output_dir,
-                        f'timeline_{idx}_{os.path.splitext(os.path.basename(test_file))[0]}.png'
-                    )
-                    plt.savefig(viz_file, dpi=150, bbox_inches='tight')
-                    print(f"✓ Saved visualization -> {viz_file}")
-                    plt.close()
-                    
-                except Exception as vis_err:
-                    print(f"Visualization error: {vis_err}")
-                    import traceback
-                    traceback.print_exc()
-        
-        except Exception as e:
-            print(f"ERROR during evaluation: {e}")
-            import traceback
-            traceback.print_exc()
-        
-        # Cleanup annotated file
+        # Cleanup
         if os.path.exists(annotated_output):
             os.remove(annotated_output)
+        if os.path.exists(unannotated_file):
+            os.remove(unannotated_file)
     
-    # Summary - consolidated by activity
-    print(f"\n{'='*70}")
-    print("CONSOLIDATED EVALUATION BY ACTIVITY (ALL TEST FILES)")
-    print(f"{'='*70}")
+    print(f"\n[OK] Generated predictions for {len(predicted_files)} files")
     
-    if all_results:
-        # Aggregate per-segment metrics across all files
-        aggregated_segments = {}
-        
-        for item in all_results:
-            pred_segs = item['pred_segments']
-            gt_segs = item['gt_segments']
-            
-            # Get confidence scores for this file if available
-            file_confidence_scores = item.get('confidence_scores', None)
-            
-            # Initialize aggregated segments
-            for seg_id in range(1, 9):
-                seg_id_str = str(seg_id)
-                
-                if seg_id_str not in aggregated_segments:
-                    aggregated_segments[seg_id_str] = {
-                        'total_predicted': 0,
-                        'total_ground_truth': 0,
-                        'true_positives': 0,
-                        'false_positives': 0,
-                        'false_negatives': 0,
-                        'start_errors': [],
-                        'end_errors': [],
-                        'duration_errors': [],
-                        'confidence_scores': [],
-                        'prediction_labels': [],
-                    }
-                
-                # Count predicted segments for this ID
-                pred_count = len([s for s in pred_segs if s.get('segment_id') == seg_id_str])
-                gt_count = len([s for s in gt_segs if s.get('segment_id') == seg_id_str])
-                
-                aggregated_segments[seg_id_str]['total_predicted'] += pred_count
-                aggregated_segments[seg_id_str]['total_ground_truth'] += gt_count
-                
-            # Calculate TP, FP, FN from the per_segment_metrics
-            results = item['results']
-            if 'per_segment_metrics' in results:
-                per_seg = results['per_segment_metrics']
-                for seg_id, metrics in per_seg.items():
-                    if seg_id not in aggregated_segments:
-                        continue
-                        
-                    agg = aggregated_segments[seg_id]
-                    
-                    num_pred = metrics['num_predicted']
-                    num_gt = metrics['num_ground_truth']
-                    
-                    # Collect confidence scores for this specific segment instance
-                    if file_confidence_scores:
-                        file_pred_segs_for_activity = [s for s in pred_segs if s.get('segment_id') == seg_id]
-                        for pred_seg in file_pred_segs_for_activity:
-                            # Find the index of this segment in the original pred_segs list
-                            try:
-                                seg_idx = pred_segs.index(pred_seg)
-                                if seg_idx < len(file_confidence_scores):
-                                    conf = file_confidence_scores[seg_idx]
-                                    
-                                    # Determine if this specific prediction is TP or FP based on metrics
-                                    if metrics['detected'] and num_pred > 0:
-                                        # First prediction is TP, rest are FP
-                                        is_first = (file_pred_segs_for_activity.index(pred_seg) == 0)
-                                        is_tp = is_first
-                                    else:
-                                        # Not detected, so all predictions are FP
-                                        is_tp = False
-                                    
-                                    agg['confidence_scores'].append(conf)
-                                    agg['prediction_labels'].append(1 if is_tp else 0)
-                            except (ValueError, IndexError):
-                                pass
-                    
-                    if metrics['detected']:
-                        # Successfully detected (already within start_threshold)
-                        agg['true_positives'] += 1
-                        
-                        # Extra predictions beyond the first match
-                        if num_pred > 1:
-                            agg['false_positives'] += (num_pred - 1)
-                        if num_gt > 1:
-                            agg['false_negatives'] += (num_gt - 1)
-        
-                    elif metrics.get('false_positive'):
-                        agg['false_positives'] += num_pred
-                        
-                    elif metrics.get('false_negative'):
-                        agg['false_negatives'] += num_gt
-                        
-                        if num_pred > 0:
-                            agg['false_positives'] += num_pred
-
-                    # Collect timing errors
-                    if metrics['start_error'] is not None:
-                        agg['start_errors'].append(metrics['start_error'])
-                        if metrics['end_error'] is not None:
-                            agg['end_errors'].append(metrics['end_error'])
-                        if metrics['duration_error'] is not None:
-                            agg['duration_errors'].append(metrics['duration_error'])
-                        
-        # Write consolidated report
-        report_path = os.path.join(output_dir, 'evaluation_by_activity.txt')
-        with open(report_path, 'w') as report_file:
-            report_file.write("="*70 + "\n")
-            report_file.write("EVALUATION BY ACTIVITY (CONSOLIDATED ACROSS ALL TEST FILES)\n")
-            report_file.write("="*70 + "\n")
-            report_file.write(f"Model: {model_name}\n")
-            report_file.write(f"Training files: {len(train_files)} (filtered)\n")
-            report_file.write(f"Test files: {len(test_files)} (unfiltered)\n")
-            report_file.write(f"Start time threshold: {evaluator.start_threshold}s\n")
-            report_file.write("="*70 + "\n\n")
-            
-            # Prepare for combined ROC plot
-            from sklearn.metrics import roc_auc_score, roc_curve
-            import numpy as np
-            
-            fig_combined, ax_combined = plt.subplots(figsize=(10, 8))
-            colors = plt.cm.tab10(np.linspace(0, 1, 8))
-            
-            for seg_id in sorted(aggregated_segments.keys()):
-                agg = aggregated_segments[seg_id]
-                
-                # Calculate per-segment AUC if we have confidence scores
-                seg_auc = None
-                fpr_seg = None
-                tpr_seg = None
-                
-                if agg['confidence_scores'] and agg['prediction_labels']:
-                    try:
-                        y_true = np.array(agg['prediction_labels'])
-                        y_scores = np.array(agg['confidence_scores'])
-                        
-                        print(f"  Debug Activity {seg_id}: {len(y_true)} predictions, {sum(y_true)} TPs, {len(y_true)-sum(y_true)} FPs")
-                        print(f"  Debug Activity {seg_id}: {len(np.unique(y_scores))} unique confidence values, {len(np.unique(y_true))} unique labels")
-                        
-                        # Only calculate if we have varied scores and both classes
-                        if len(np.unique(y_scores)) > 1 and len(np.unique(y_true)) > 1:
-                            seg_auc = roc_auc_score(y_true, y_scores)
-                            
-                            # Calculate ROC curve for plotting
-                            fpr_seg, tpr_seg, thresholds = roc_curve(y_true, y_scores)
-                            
-                            # Add to combined plot
-                            seg_idx = int(seg_id) - 1
-                            ax_combined.plot(fpr_seg, tpr_seg, color=colors[seg_idx], lw=2,
-                                           label=f'Activity {seg_id} (AUC = {seg_auc:.3f})')
-                            print(f"  Debug Activity {seg_id}: ✓ ROC/AUC calculated successfully: {seg_auc:.4f}")
-                        else:
-                            if len(np.unique(y_true)) == 1:
-                                print(f"  Debug Activity {seg_id}: ✗ Only one class present (all {y_true[0]}s)")
-                            else:
-                                print(f"  Debug Activity {seg_id}: ✗ All confidence scores identical")
-                            
-                    except Exception as e:
-                        print(f"  Warning: Could not calculate AUC for activity {seg_id}: {e}")
-                else:
-                    print(f"  Debug Activity {seg_id}: ✗ No confidence scores available")
-                
-                # Calculate precision, recall, F1 for this activity
-                tp = agg['true_positives']
-                fp = agg['false_positives']
-                fn = agg['false_negatives']
-                
-                precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-                recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-                f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
-                
-                # Print to terminal
-                print(f"\n--- Activity {seg_id} ---")
-                print(f"  Total Predicted:     {agg['total_predicted']}")
-                print(f"  Total Ground Truth:  {agg['total_ground_truth']}")
-                print(f"  True Positives:      {tp}")
-                print(f"  False Positives:     {fp}")
-                print(f"  False Negatives:     {fn}")
-                print(f"  Precision:           {precision:.4f}")
-                print(f"  Recall:              {recall:.4f}")
-                print(f"  F1 Score:            {f1:.4f}")
-                if seg_auc is not None:
-                    print(f"  AUC:                 {seg_auc:.4f}")
-                
-                # Write to file
-                report_file.write(f"\n--- Activity {seg_id} ---\n")
-                report_file.write(f"  Total Predicted:     {agg['total_predicted']}\n")
-                report_file.write(f"  Total Ground Truth:  {agg['total_ground_truth']}\n")
-                report_file.write(f"  True Positives:      {tp}\n")
-                report_file.write(f"  False Positives:     {fp}\n")
-                report_file.write(f"  False Negatives:     {fn}\n")
-                report_file.write(f"  Precision:           {precision:.4f}\n")
-                report_file.write(f"  Recall:              {recall:.4f}\n")
-                report_file.write(f"  F1 Score:            {f1:.4f}\n")
-                if seg_auc is not None:
-                    report_file.write(f"  AUC:                 {seg_auc:.4f}\n")
-                
-                if agg['start_errors']:
-                    # Filter out None values
-                    start_errs = [e for e in agg['start_errors'] if e is not None]
-                    end_errs = [e for e in agg['end_errors'] if e is not None]
-                    dur_errs = [e for e in agg['duration_errors'] if e is not None]
-                    
-                    if start_errs:
-                        mean_start = np.mean(start_errs)
-                        std_start = np.std(start_errs)
-                        total_matched = len(start_errs)
-                        
-                        print(f"  Start Error (mean):  {mean_start:.4f}s (±{std_start:.4f}s)")
-                        report_file.write(f"  Start Error (mean):  {mean_start:.4f}s (±{std_start:.4f}s)\n")
-                    
-                    if end_errs:
-                        mean_end = np.mean(end_errs)
-                        print(f"  End Error (mean):    {mean_end:.4f}s")
-                        report_file.write(f"  End Error (mean):    {mean_end:.4f}s\n")
-                    
-                    if dur_errs:
-                        mean_duration = np.mean(dur_errs)
-                        print(f"  Duration Err (mean): {mean_duration:.4f}s")
-                        report_file.write(f"  Duration Err (mean): {mean_duration:.4f}s\n")
-                            
-            print(f"{'='*70}")
-            report_file.write("="*70 + "\n")
-            
-            # Finalize and save combined ROC plot
-            ax_combined.plot([0, 1], [0, 1], color='gray', lw=2, linestyle='--', 
-                            label='Random classifier', alpha=0.5)
-            ax_combined.set_xlim([0.0, 1.0])
-            ax_combined.set_ylim([0.0, 1.05])
-            ax_combined.set_xlabel('False Positive Rate', fontsize=12)
-            ax_combined.set_ylabel('True Positive Rate', fontsize=12)
-            ax_combined.set_title('ROC Curves by Activity (Aggregated)', fontsize=14, fontweight='bold')
-            ax_combined.legend(loc="lower right", fontsize=9)
-            ax_combined.grid(alpha=0.3)
-            plt.tight_layout()
-            
-            combined_roc_file = os.path.join(output_dir, 'roc_by_activity.png')
-            plt.savefig(combined_roc_file, dpi=150, bbox_inches='tight')
-            plt.close()
-            print(f"\n✓ Saved ROC curve by activity -> {combined_roc_file}")
-        
-        print(f"✓ Saved consolidated report -> {report_path}")
+    if len(predicted_files) == 0:
+        print("ERROR: No predictions generated")
+        shutil.rmtree(temp_dir)
+        return None
     
-    else:
-        print("\nNo results to summarize. Check errors above.")
+    # Evaluate
+    print(f"\nEvaluating fold {fold_idx + 1}...")
+    multi_results = evaluator.evaluate_multiple_files(predicted_files, ground_truth_files)
     
-    # Cleanup temp directory
-    print("\nCleaning up temporary files...")
+    # Cleanup
     shutil.rmtree(temp_dir)
     
-    return all_results
+    return multi_results
 
-
-def get_matching_unfiltered_file(filtered_file, unfiltered_dir='./data_spaces'):
-    """
-    Find the corresponding unfiltered file for a filtered file
+def print_fold_comparison(all_fold_results, activity_filter):
+    """Print comparison of metrics across all folds"""
+    print(f"\n{'='*70}")
+    print("CROSS-FOLD COMPARISON")
+    print(f"{'='*70}")
     
-    Args:
-        filtered_file: Path to filtered file (e.g., './data_filtered/P001.txt')
-        unfiltered_dir: Directory containing unfiltered files
+    n_folds = len(all_fold_results)
+    
+    # Aggregate metrics
+    print(f"\n{'Metric':<20} {'Mean':>10} {'Std':>10} {'Min':>10} {'Max':>10}")
+    print("-"*70)
+    
+    # Micro-average metrics
+    micro_precision = [r['micro_avg']['precision'] for r in all_fold_results]
+    micro_recall = [r['micro_avg']['recall'] for r in all_fold_results]
+    micro_f1 = [r['micro_avg']['f1_score'] for r in all_fold_results]
+    
+    print(f"{'Micro Precision':<20} {np.mean(micro_precision):>10.4f} {np.std(micro_precision):>10.4f} {np.min(micro_precision):>10.4f} {np.max(micro_precision):>10.4f}")
+    print(f"{'Micro Recall':<20} {np.mean(micro_recall):>10.4f} {np.std(micro_recall):>10.4f} {np.min(micro_recall):>10.4f} {np.max(micro_recall):>10.4f}")
+    print(f"{'Micro F1':<20} {np.mean(micro_f1):>10.4f} {np.std(micro_f1):>10.4f} {np.min(micro_f1):>10.4f} {np.max(micro_f1):>10.4f}")
+    
+    # Per-activity metrics
+    print(f"\n{'='*70}")
+    print("PER-ACTIVITY METRICS ACROSS FOLDS")
+    print(f"{'='*70}")
+    
+    for activity_id in activity_filter:
+        print(f"\n--- Activity {activity_id} ---")
         
-    Returns:
-        Path to unfiltered file or None if not found
-    """
-    basename = os.path.basename(filtered_file)
-    unfiltered_path = os.path.join(unfiltered_dir, basename)
+        # Collect metrics for this activity across folds
+        precisions = []
+        recalls = []
+        f1s = []
+        frame_aucs = []
+        seg_aucs = []
+        
+        for fold_result in all_fold_results:
+            if activity_id in fold_result['per_class']:
+                metrics = fold_result['per_class'][activity_id]
+                precisions.append(metrics['precision'])
+                recalls.append(metrics['recall'])
+                f1s.append(metrics['f1_score'])
+            
+            if 'frame_level' in fold_result and activity_id in fold_result['frame_level']:
+                auc_val = fold_result['frame_level'][activity_id].get('auc')
+                if auc_val is not None:
+                    frame_aucs.append(auc_val)
+            
+            if 'segment_level' in fold_result and activity_id in fold_result['segment_level']:
+                auc_val = fold_result['segment_level'][activity_id].get('auc')
+                if auc_val is not None:
+                    seg_aucs.append(auc_val)
+        
+        if precisions:
+            print(f"  Precision:     {np.mean(precisions):.4f} ± {np.std(precisions):.4f}")
+            print(f"  Recall:        {np.mean(recalls):.4f} ± {np.std(recalls):.4f}")
+            print(f"  F1 Score:      {np.mean(f1s):.4f} ± {np.std(f1s):.4f}")
+        
+        if frame_aucs:
+            print(f"  Frame AUC:     {np.mean(frame_aucs):.4f} ± {np.std(frame_aucs):.4f}")
+        
+        if seg_aucs:
+            print(f"  Segment AUC:   {np.mean(seg_aucs):.4f} ± {np.std(seg_aucs):.4f}")
     
-    if os.path.exists(unfiltered_path):
-        return unfiltered_path
-    else:
-        # File doesn't exist - this is expected if not all files are in both dirs
-        return None
+    print(f"{'='*70}\n")
+    
+def create_aggregated_summary(all_fold_results, activity_filter):
+    """Create aggregated summary across all folds"""
+    
+    summary = {
+        'num_folds': len(all_fold_results),
+        'per_class': {},
+        'aggregate': {}
+    }
+    
+    # Aggregate per-class metrics
+    for activity_id in activity_filter:
+        class_metrics = {
+            'TP_duration': [],
+            'FP_duration': [],
+            'FN_duration': [],
+            'precision': [],
+            'recall': [],
+            'f1_score': [],
+            'iou': [],
+            'gt_total_duration': [],
+            'pred_total_duration': [],
+            'frame_auc': [],
+            'segment_auc': []
+        }
+        
+        for fold_result in all_fold_results:
+            if activity_id in fold_result.get('per_class', {}):
+                metrics = fold_result['per_class'][activity_id]
+                class_metrics['TP_duration'].append(metrics['TP_duration'])
+                class_metrics['FP_duration'].append(metrics['FP_duration'])
+                class_metrics['FN_duration'].append(metrics['FN_duration'])
+                class_metrics['precision'].append(metrics['precision'])
+                class_metrics['recall'].append(metrics['recall'])
+                class_metrics['f1_score'].append(metrics['f1_score'])
+                class_metrics['iou'].append(metrics['iou'])
+                class_metrics['gt_total_duration'].append(metrics['gt_total_duration'])
+                class_metrics['pred_total_duration'].append(metrics['pred_total_duration'])
+            
+            if 'frame_level' in fold_result and activity_id in fold_result['frame_level']:
+                auc_val = fold_result['frame_level'][activity_id].get('auc')
+                if auc_val is not None:
+                    class_metrics['frame_auc'].append(auc_val)
+            
+            if 'segment_level' in fold_result and activity_id in fold_result['segment_level']:
+                auc_val = fold_result['segment_level'][activity_id].get('auc')
+                if auc_val is not None:
+                    class_metrics['segment_auc'].append(auc_val)
+        
+        # Calculate mean ± std for each metric
+        summary['per_class'][activity_id] = {}
+        for metric, values in class_metrics.items():
+            if len(values) > 0:
+                summary['per_class'][activity_id][metric] = {
+                    'mean': float(np.mean(values)),
+                    'std': float(np.std(values)),
+                    'min': float(np.min(values)),
+                    'max': float(np.max(values))
+                }
+            else:
+                summary['per_class'][activity_id][metric] = None
+    
+    # Aggregate overall metrics
+    for avg_type in ['micro_avg', 'macro_avg', 'weighted_avg']:
+        agg_metrics = {
+            'precision': [],
+            'recall': [],
+            'f1_score': []
+        }
+        
+        if avg_type == 'micro_avg':
+            agg_metrics['total_TP_duration'] = []
+            agg_metrics['total_FP_duration'] = []
+            agg_metrics['total_FN_duration'] = []
+        
+        for fold_result in all_fold_results:
+            if avg_type in fold_result:
+                agg_metrics['precision'].append(fold_result[avg_type].get('precision', 0))
+                agg_metrics['recall'].append(fold_result[avg_type].get('recall', 0))
+                agg_metrics['f1_score'].append(fold_result[avg_type].get('f1_score', 0))
+                
+                if avg_type == 'micro_avg':
+                    agg_metrics['total_TP_duration'].append(
+                        fold_result[avg_type].get('total_TP_duration', 0))
+                    agg_metrics['total_FP_duration'].append(
+                        fold_result[avg_type].get('total_FP_duration', 0))
+                    agg_metrics['total_FN_duration'].append(
+                        fold_result[avg_type].get('total_FN_duration', 0))
+        
+        summary['aggregate'][avg_type] = {}
+        for metric, values in agg_metrics.items():
+            if len(values) > 0:
+                summary['aggregate'][avg_type][metric] = {
+                    'mean': float(np.mean(values)),
+                    'std': float(np.std(values)),
+                    'min': float(np.min(values)),
+                    'max': float(np.max(values))
+                }
+    
+    return summary
 
+def run_cross_validation(files, unfiltered_dir, output_dir, model_name_base,
+                        start_error_threshold, n_folds=5, visualize=False):
+    """
+    Run k-fold cross-validation
+    """
+    evaluator = SegmentEvaluator(
+        timeline_resolution_seconds=1.0,
+        start_time_threshold_seconds=start_error_threshold
+    )
+    
+    activity_filter = ['1', '2', '3', '4', '5', '6', '7', '8']
+    
+    # Create stratified folds
+    folds, file_activity_counts = create_stratified_folds(
+        files, evaluator, n_folds=n_folds, activity_ids=activity_filter
+    )
+    
+    total_in_folds = sum(len(fold) for fold in folds)
+    
+    if total_in_folds != len(files):
+        print(f"\nERROR: Lost {len(files) - total_in_folds} files during fold creation!")
+        
+    all_fold_files = [f for fold in folds for f in fold]
+    unique_files = set(all_fold_files)
+
+    if len(all_fold_files) != len(unique_files):
+        print("[WARNING] Some files appear in multiple folds!")
+        seen, duplicates = set(), []
+        for f in all_fold_files:
+            if f in seen:
+                duplicates.append(f)
+            else:
+                seen.add(f)
+        print(f"Duplicate files ({len(duplicates)}):")
+        for dup in duplicates[:10]:
+            print(f"  - {dup}")
+        if len(duplicates) > 10:
+            print(f"  ... and {len(duplicates) - 10} more")
+    else:
+        print("[OK] No file overlaps found between folds")
+    
+    # Run each fold
+    all_fold_results = []
+    
+    for fold_idx in range(n_folds):
+        # Create train/test split from FILTERED files
+        test_file_paths_filtered = folds[fold_idx]
+        train_file_paths_filtered = []
+        for i in range(n_folds):
+            if i != fold_idx:
+                train_file_paths_filtered.extend(folds[i])
+        
+        # DEBUG: Print filtered split
+        print(f"\n{'='*70}")
+        print(f"FOLD {fold_idx + 1}/{n_folds} - DATA SPLIT (FILTERED)")
+        print(f"{'='*70}")
+        print(f"Test (filtered): {len(test_file_paths_filtered)} files")
+        print(f"Train (filtered): {len(train_file_paths_filtered)} files")
+        print(f"Total (filtered): {len(test_file_paths_filtered) + len(train_file_paths_filtered)} files")
+        
+        # Get matching UNFILTERED test files
+        test_file_paths_unfiltered = []
+        missing_files = []
+        for filtered_path in test_file_paths_filtered:
+            basename = os.path.basename(filtered_path)
+            unfiltered_path = os.path.join(unfiltered_dir, basename)
+            if os.path.exists(unfiltered_path):
+                test_file_paths_unfiltered.append(unfiltered_path)
+            else:
+                missing_files.append(basename)
+        
+        # Print unfiltered split
+        print(f"\n{'='*70}")
+        print(f"FOLD {fold_idx + 1}/{n_folds} - DATA SPLIT (UNFILTERED)")
+        print(f"{'='*70}")
+        print(f"Training: {len(train_file_paths_filtered)} files (filtered)")
+        print(f"Testing: {len(test_file_paths_unfiltered)} files (unfiltered)")
+        print(f"Expected test files: {len(test_file_paths_filtered)}")
+        print(f"Actual test files found: {len(test_file_paths_unfiltered)}")
+        print(f"Missing files: {len(missing_files)}")
+        
+        if missing_files:
+            print(f"\nWARNING: Missing unfiltered files:")
+            for f in missing_files[:10]:
+                print(f"  - {f}")
+            if len(missing_files) > 10:
+                print(f"  ... and {len(missing_files) - 10} more")
+        
+        # Calculate expected percentages
+        total_filtered = len(test_file_paths_filtered) + len(train_file_paths_filtered)
+        expected_train_pct = len(train_file_paths_filtered) / total_filtered * 100
+        expected_test_pct = len(test_file_paths_filtered) / total_filtered * 100
+        
+        print(f"\nExpected split: {expected_train_pct:.1f}% train / {expected_test_pct:.1f}% test")
+        
+        # Print activity distribution for this fold
+        print(f"\n{'Activity':<12} {'Train Count':>12} {'Test Count':>12}")
+        print("-"*40)
+        
+        for aid in activity_filter:
+            train_count = sum(file_activity_counts[f][aid] for f in train_file_paths_filtered)
+            test_count = 0
+            for unfiltered_path in test_file_paths_unfiltered:
+                basename = os.path.basename(unfiltered_path)
+                # Find the corresponding filtered file in test set
+                for filtered_path in test_file_paths_filtered:
+                    if os.path.basename(filtered_path) == basename:
+                        test_count += file_activity_counts[filtered_path][aid]
+                        break
+            
+            print(f"{aid:<12} {train_count:>12} {test_count:>12}")
+        
+        # Create fold-specific output directory
+        fold_output_dir = os.path.join(output_dir, f'fold_{fold_idx + 1}')
+        os.makedirs(fold_output_dir, exist_ok=True)
+        
+        # Run fold
+        model_name = f"{model_name_base}_fold{fold_idx}"
+        fold_results = run_fold(
+            fold_idx, 
+            train_file_paths_filtered,
+            test_file_paths_unfiltered,
+            fold_output_dir,
+            model_name,
+            start_error_threshold,
+            evaluator,
+            visualize=visualize
+        )
+        
+        if fold_results is None:
+            print(f"ERROR: Fold {fold_idx + 1} failed")
+            continue
+        
+        all_fold_results.append(fold_results)
+        
+        # Print fold report
+        print(f"\n{'='*70}")
+        print(f"FOLD {fold_idx + 1} RESULTS")
+        print(f"{'='*70}")
+        evaluator.print_report(fold_results, activity_filter=activity_filter)
+        
+        # Generate ROC curves for this fold
+        combined_roc_file = os.path.join(fold_output_dir, f'roc_fold{fold_idx + 1}_cumulative.png')
+        try:
+            evaluator.plot_dual_roc_curves(
+                fold_results,
+                save_path=combined_roc_file,
+                activity_filter=activity_filter
+            )
+            print(f"\n[OK] Fold {fold_idx + 1} ROC curves saved")
+        except Exception as e:
+            print(f"✗ Could not generate ROC for fold {fold_idx + 1}: {e}")
+    
+    # Print cross-fold comparison
+    if len(all_fold_results) > 0:
+        print_fold_comparison(all_fold_results, activity_filter)
+        
+        print(f"\nGenerating aggregated ROC curves across all {n_folds} folds...")
+        evaluator.generate_aggregated_roc_curves(
+            all_fold_results,
+            output_dir,
+            activity_filter
+        )
+        
+        # Filter results and strip ROC arrays
+        print("\nFiltering results to activities 1-8 and removing ROC arrays for JSON export...")
+        filtered_fold_results = []
+        for fold_result in all_fold_results:
+            filtered_result = filter_results_by_activity(fold_result, activity_filter)
+            filtered_fold_results.append(filtered_result)
+
+        # Save per-fold summaries (CLEAN - no ROC arrays)
+        for fold_idx, filtered_result in enumerate(filtered_fold_results):
+            fold_json_path = os.path.join(output_dir, f'fold_{fold_idx + 1}', 'fold_summary.json')
+            with open(fold_json_path, 'w') as f:
+                json.dump({
+                    'fold': fold_idx + 1,
+                    'start_time_threshold': start_error_threshold,
+                    'activity_filter': activity_filter,
+                    'results': convert_to_json_serializable(filtered_result)
+                }, f, indent=2)
+
+        # Create and save aggregated summary
+        aggregated_summary = create_aggregated_summary(filtered_fold_results, activity_filter)
+        agg_json_path = os.path.join(output_dir, 'cross_validation_summary.json')
+        with open(agg_json_path, 'w') as f:
+            json.dump({
+                'metadata': {
+                    'n_folds': n_folds,
+                    'start_time_threshold': start_error_threshold,
+                    'activity_filter': activity_filter,
+                    'timestamp': datetime.now().isoformat()
+                },
+                'aggregated': convert_to_json_serializable(aggregated_summary)
+            }, f, indent=2)
+
+        print(f"[OK] Cross-validation results saved:")
+        print(f"  - Aggregated summary: {agg_json_path}")
+        print(f"  - Per-fold summaries: ./fold_N/fold_summary.json")
+    
+    return all_fold_results
 
 def main():
     # Configuration
     random.seed(42)
     
-    filtered_data_dir = './data_filtered'  # For training
-    unfiltered_data_dir = './data_spaces'  # For testing
-    model_name = 'quick_test_model'
-    start_error_threshold = 15.0  # Define the threshold here
+    filtered_data_dir = './data_filtered'
+    unfiltered_data_dir = './data_spaces'
+    model_name_base = 'cv_model'
+    start_error_threshold = 100
+    n_folds = 5
     
-    # Create timestamped output directory with descriptive name
+    # Create output directory
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    
-    # Extract the last part of the filtered_data_dir for the folder name
     filtered_dir_name = os.path.basename(os.path.normpath(filtered_data_dir))
-    
-    # Create descriptive folder name: timestamp_filtereddir_threshold
-    output_dir_name = f'run_{timestamp}_{filtered_dir_name}_thresh{int(start_error_threshold)}s'
+    output_dir_name = f'run_{timestamp}_{n_folds}fold_{filtered_dir_name}_thresh{int(start_error_threshold)}s'
     output_dir = os.path.join('./output', output_dir_name)
     os.makedirs(output_dir, exist_ok=True)
     print(f"Output directory: {output_dir}")
     
-    # Get all filtered data files for training (use ALL of them)
-    filtered_files = [
+    # Get all filtered files
+    all_filtered_files = [
         os.path.join(filtered_data_dir, f) 
         for f in os.listdir(filtered_data_dir) 
         if f.endswith('.txt')
     ]
     
-    print(f"Found {len(filtered_files)} filtered files in {filtered_data_dir}")
+    all_filtered_files = all_filtered_files[:50]
+    
+    
+    # CRITICAL: Only keep files that have matches in BOTH directories
+    filtered_files = []
+    missing_unfiltered = []
+    
+    for filtered_file in all_filtered_files:
+        basename = os.path.basename(filtered_file)
+        unfiltered_file = os.path.join(unfiltered_data_dir, basename)
+        if os.path.exists(unfiltered_file):
+            filtered_files.append(filtered_file)
+        else:
+            missing_unfiltered.append(basename)
+         
+    if len(filtered_files) > 0:
+        print("\nTesting first file format...")
+        test_file_format(filtered_files[0])
+    
+    if missing_unfiltered:
+        print(f"\nWARNING: {len(missing_unfiltered)} files will be EXCLUDED from cross-validation")
+        print(f"because they don't have matching unfiltered versions!")
+        print(f"\nFirst 10 missing unfiltered files:")
+        for f in missing_unfiltered[:10]:
+            print(f"  - {f}")
+        
+        if len(missing_unfiltered) > 10:
+            print(f"  ... and {len(missing_unfiltered) - 10} more")
     
     if len(filtered_files) == 0:
-        print(f"ERROR: No filtered files found in {filtered_data_dir}")
+        print(f"\nERROR: No matching file pairs found!")
+        print(f"Filtered dir: {filtered_data_dir}")
+        print(f"Unfiltered dir: {unfiltered_data_dir}")
         return
     
-    # Shuffle filtered files for training
-    random.shuffle(filtered_files)
+    print(f"\n[OK] Using {len(filtered_files)} matched file pairs for cross-validation")
+    print(f"{'='*70}\n")
     
-    split_index = int(len(filtered_files) * 0.7)
-    train_files = filtered_files[:split_index]
-    test_candidate_files = filtered_files[split_index:]
-
-    print(f"Split: {len(train_files)} training files (70%), {len(test_candidate_files)} test candidates (30%)")
+    # Ask about visualization (commented out for batch mode)
+    visualize = input("Enable timeline visualization? (y/n): ").lower().strip() == 'y'
+    # visualize = False
     
-    # Get corresponding unfiltered files for testing
-    # Only use unfiltered files that have a match in filtered
-    test_files = []
-    for filtered_file in test_candidate_files:
-        unfiltered_file = get_matching_unfiltered_file(filtered_file, unfiltered_data_dir)
-        if unfiltered_file:
-            test_files.append(unfiltered_file)
-    
-    # If we don't have enough test files from the split, try to find more
-    if len(test_files) < 3:
-        print(f"Warning: Only found {len(test_files)} matching test files from the split.")
-        print("Looking for additional matching files...")
-        
-        # Get all unfiltered files
-        all_unfiltered = [
-            os.path.join(unfiltered_data_dir, f)
-            for f in os.listdir(unfiltered_data_dir)
-            if f.endswith('.txt')
-        ]
-        
-        # Find which ones have matches in filtered (but weren't used for training)
-        train_basenames = {os.path.basename(f) for f in train_files}
-        
-        for unfiltered_file in all_unfiltered:
-            basename = os.path.basename(unfiltered_file)
-            # Check if this file exists in filtered AND wasn't used for training
-            filtered_match = os.path.join(filtered_data_dir, basename)
-            if os.path.exists(filtered_match) and basename not in train_basenames:
-                if unfiltered_file not in test_files:
-                    test_files.append(unfiltered_file)
-                    if len(test_files) >= 3:
-                        break
-    
-    if len(test_files) == 0:
-        print(f"ERROR: Could not find any unfiltered test files in {unfiltered_data_dir}")
-        print(f"       that have matching filtered files in {filtered_data_dir}")
-        
-        # Show what we have
-        print(f"\nSample filtered files:")
-        for f in filtered_files[:5]:
-            print(f"  - {os.path.basename(f)}")
-        
-        print(f"\nSample unfiltered files:")
-        unfiltered_samples = [f for f in os.listdir(unfiltered_data_dir) if f.endswith('.txt')][:5]
-        for f in unfiltered_samples:
-            print(f"  - {f}")
-        
-        return
-    
+    # DEBUG: Print what we're passing to run_cross_validation
     print(f"\n{'='*70}")
-    print("DATA CONFIGURATION")
+    print("STARTING CROSS-VALIDATION")
     print(f"{'='*70}")
-    print(f"Training on: {len(train_files)} FILTERED files from {filtered_data_dir}")
-    print(f"Testing on: {len(test_files)} UNFILTERED files from {unfiltered_data_dir}")
-    print(f"Start error threshold: {start_error_threshold}s")
+    print(f"Passing {len(filtered_files)} files to run_cross_validation")
+    print(f"n_folds: {n_folds}")
+    print(f"Expected files per fold: ~{len(filtered_files) / n_folds:.1f}")
+    print(f"Expected train size per fold: ~{len(filtered_files) * (n_folds - 1) / n_folds:.1f} ({(n_folds - 1) / n_folds * 100:.1f}%)")
+    print(f"Expected test size per fold: ~{len(filtered_files) / n_folds:.1f} ({100 / n_folds:.1f}%)")
+    print(f"{'='*70}\n")
     
-    # Check if model already exists
-    model_exists = check_existing_model(model_name)
-    use_existing = False
+    VALIDATION_MODE = 0  # Set to True to run in validation mode
     
-    if model_exists:
-        print(f"\n{'='*70}")
-        print(f"EXISTING MODEL FOUND: {model_name}")
-        print(f"{'='*70}")
-        print(f"Model location: ./AL/model/{model_name}.pkl.gz")
+    # Run cross-validation with ONLY the matched files
+    if VALIDATION_MODE:
+        print("\n" + "="*70)
+        print("RUNNING IN VALIDATION MODE")
+        print("="*70)
+        print("Training is DISABLED. Each file will be compared against itself.")
+        print("Expected metrics: Precision = 1.0, Recall = 1.0, F1 = 1.0")
+        print("="*70 + "\n")
         
-        choice = input("\nDo you want to use the existing model? (y/n): ").lower().strip()
-        
-        if choice == 'y':
-            use_existing = True
-            print("\n✓ Will use existing model (skipping training)")
-        else:
-            print("\n✓ Will train a new model (existing model will be overwritten)")
-            print(f"\nTrain files ({len(train_files)}) from FILTERED data:")
-            for f in train_files[:5]:  # Show first 5
-                print(f"  - {os.path.basename(f)}")
-            if len(train_files) > 5:
-                print(f"  ... and {len(train_files) - 5} more")
+        all_fold_results = run_cross_validation_validation_mode(
+            filtered_files,
+            output_dir,
+            start_error_threshold,
+            n_folds=n_folds
+        )
     else:
-        print(f"\nNo existing model found. Will train new model: {model_name}")
-        print(f"\nTrain files ({len(train_files)}) from FILTERED data:")
-        for f in train_files[:5]:
-            print(f"  - {os.path.basename(f)}")
-        if len(train_files) > 5:
-            print(f"  ... and {len(train_files) - 5} more")
+        all_fold_results = run_cross_validation(
+            filtered_files,
+            unfiltered_data_dir,
+            output_dir,
+            model_name_base,
+            start_error_threshold,
+            n_folds=n_folds,
+            visualize=False
+        )
     
-    print(f"\nTest files ({len(test_files)}) from UNFILTERED data:")
-    for f in test_files:
-        print(f"  - {os.path.basename(f)}")
-    
-    # Ask about visualization
-    visualize = input("\nEnable timeline visualization? (y/n): ").lower().strip() == 'y'
-    
-    # Run the test - pass the threshold
-    results = run_quick_test(
-        train_files, 
-        test_files, 
-        output_dir,
-        visualize=visualize,
-        use_existing_model=use_existing,
-        model_name=model_name,
-        start_error_threshold=start_error_threshold  # Pass threshold here
-    )
-    
-    print(f"\n{'='*70}")
-    print("Quick test complete!")
-    print(f"{'='*70}")
-    
-    # Show what files were generated
-    print(f"\nAll outputs saved to: {output_dir}")
-    print("\nGenerated files:")
-    if os.path.exists(output_dir):
-        generated = sorted(os.listdir(output_dir))
-        for f in generated:
-            print(f"  - {f}")
-    
-    print(f"\nModel location:")
-    print(f"  - ./AL/model/{model_name}.pkl.gz")
-
+    if all_fold_results:
+        print('\a')
+        print("\n" + "="*70)
+        print("CROSS-VALIDATION COMPLETE!")
+        print("="*70)
+        print(f"\nAll outputs saved to: {output_dir}")
+        print(f"Total files used: {len(filtered_files)}")
+        if missing_unfiltered:
+            print(f"Files excluded: {len(missing_unfiltered)}")
+    else:
+        print("\nCross-validation completed with errors.")
 
 if __name__ == "__main__":
     main()
