@@ -41,7 +41,7 @@ def run_single_test(evaluator, predicted_file, ground_truth_file, variant_name,
     try:
         # Use evaluate_with_dual_roc to get ROC curves
         if show_roc:
-            results = evaluator.evaluate_with_dual_roc(predicted_file, ground_truth_file)
+            results = evaluator.evaluate_with_dual_roc(predicted_file, ground_truth_file, aggregation='average')
             
             # Plot ROC curves
             try:
@@ -234,7 +234,7 @@ def run_all_sanity_tests(ground_truth_file, sanity_check_dir="./SanityCheck",
                         show_roc=False, activity_filter=None):
     """Run evaluation on all sanity check variants and generate summary report"""
     
-    evaluator = SegmentEvaluator(start_time_threshold_seconds=start_time_threshold_seconds)
+    evaluator = SegmentEvaluator(timeline_resolution_seconds=5,start_time_threshold_seconds=start_time_threshold_seconds)
     
     variants = [
         'perfect',
@@ -287,7 +287,26 @@ def run_all_sanity_tests(ground_truth_file, sanity_check_dir="./SanityCheck",
     print(f"\n{'Variant':<20} {'F1':>8} {'Precision':>10} {'Recall':>8} {'Frame AUC':>10} {'Seg AUC':>10}")
     print("-"*80)
     
-    for variant, results in all_results.items():
+    for variant_name in variants:
+        pred_file = os.path.join(sanity_check_dir, f'P001_{variant_name}.txt')
+        
+        print(f"\nEvaluating {variant_name}...")
+        results = evaluator.evaluate_with_dual_roc(pred_file, ground_truth_file, aggregation='average')
+        
+        # ADD DEBUG HERE FOR PERFECT VARIANT
+        if variant_name == 'perfect':
+            print("\n=== Perfect Variant Debug ===")
+            
+            pred_df = evaluator.parse_log_file(pred_file)
+            gt_df = evaluator.parse_log_file(ground_truth_file)
+                            
+        # if variant_name in ['label_confusion', 'false_positives', 'combined_errors']:
+        #    print(f"\n=== {variant_name} Confidence Check ===")
+        #    print(f"  Mean confidence: {pred_df['confidence'].mean():.3f}")
+        #   print(f"  Expected for {variant_name}: 0.15-0.50")
+        
+        # Continue with normal processing
+        micro = results.get('micro_avg', {})
         # Get metrics from micro_avg
         micro = results.get('micro_avg', {})
         f1 = micro.get('f1_score', 0)
@@ -347,7 +366,7 @@ def test_with_confidence_scores(ground_truth_file, predicted_file, confidence_sc
     print("TESTING WITH CONFIDENCE SCORES (SVM Mode)")
     print("="*70)
     
-    evaluator = SegmentEvaluator(timeline_resolution_seconds=1.0,start_time_threshold_seconds=start_time_threshold_seconds)
+    evaluator = SegmentEvaluator(timeline_resolution_seconds=30.0,start_time_threshold_seconds=start_time_threshold_seconds)
     
     results = evaluator.evaluate(
         predicted_file,
@@ -369,16 +388,56 @@ def test_with_confidence_scores(ground_truth_file, predicted_file, confidence_sc
 def quick_test(ground_truth_file, predicted_file, start_time_threshold_seconds=2.0, 
                show_roc=False, activity_filter=None):
     """Quick single-file test"""
-    evaluator = SegmentEvaluator(start_time_threshold_seconds=start_time_threshold_seconds)
+    evaluator = SegmentEvaluator(timeline_resolution_seconds=30,start_time_threshold_seconds=start_time_threshold_seconds)
     
     if show_roc:
-        results = evaluator.evaluate_with_dual_roc(predicted_file, ground_truth_file)
+        results = evaluator.evaluate_with_dual_roc(predicted_file, ground_truth_file, aggregation='average')
         try:
             evaluator.plot_dual_roc_curves(results, save_path='roc_quick_test.png', activity_filter=['1', '2', '3', '4', '5', '6', '7', '8'])
         except Exception as e:
             print(f"Could not plot ROC curves: {e}")
     else:
         results = evaluator.evaluate(predicted_file, ground_truth_file)
+        
+    # ADD THE DEBUG CODE HERE (before print_report)
+    print("\n=== Frame-Level Timeline Debug ===")
+    pred_df = evaluator.parse_log_file(predicted_file)
+    gt_df = evaluator.parse_log_file(ground_truth_file)
+
+    pred_segments = evaluator.extract_segments(pred_df)
+    gt_segments = evaluator.extract_segments(gt_df)
+
+    all_times = []
+    for seg in pred_segments + gt_segments:
+        all_times.extend([seg['start_time'], seg['end_time']])
+
+    start_time = min(all_times)
+    end_time = max(all_times)
+
+    # Create ground truth timeline
+    gt_timeline, _ = evaluator.create_timeline(gt_segments, start_time, end_time)
+
+    # Create frame-level prediction timeline
+    pred_timeline, pred_conf_timeline = evaluator.create_true_frame_level_timeline_from_events(
+        pred_df, start_time, end_time, aggregation='average'
+    )
+
+    print(f"Timeline length: {len(pred_timeline)}")
+    print(f"Non-empty frames: {np.sum(pred_timeline != 'None')}")
+    print(f"Frames with confidence > 0: {np.sum(pred_conf_timeline > 0)}")
+    print(f"Mean confidence (non-zero): {np.mean(pred_conf_timeline[pred_conf_timeline > 0]):.3f}")
+    print(f"Min confidence (non-zero): {np.min(pred_conf_timeline[pred_conf_timeline > 0]):.3f}")
+    print(f"Max confidence: {np.max(pred_conf_timeline):.3f}")
+
+    # Check for activity 1 specifically
+    activity_1_gt_frames = np.sum(gt_timeline == '1')
+    activity_1_pred_frames = np.sum(pred_timeline == '1')
+    activity_1_conf_frames = np.sum((pred_timeline == '1') & (pred_conf_timeline > 0))
+
+    print(f"\nActivity 1 frames:")
+    print(f"  GT frames: {activity_1_gt_frames}")
+    print(f"  Pred frames: {activity_1_pred_frames}")
+    print(f"  Pred frames with conf>0: {activity_1_conf_frames}")
     
     evaluator.print_report(results, activity_filter=activity_filter)
     return results
@@ -409,7 +468,7 @@ if __name__ == "__main__":
     show_roc = input("\nGenerate ROC curves? (y/n): ").lower().strip() == 'y'
         
     # Option 3: Ask about time tolerance
-    start_time_threshold_seconds = int(input("\nStart and end time tolerance in seconds: ").strip())
+    #start_time_threshold_seconds = int(input("\nStart and end time tolerance in seconds: ").strip())
     
     # Option 4: Run full test suite
     print("\n" + "="*70)
@@ -427,7 +486,7 @@ if __name__ == "__main__":
             GROUND_TRUTH_FILE, 
             SANITY_CHECK_DIR, 
             timeline_visualisation=timeline_visualisation_enabled,
-            start_time_threshold_seconds=start_time_threshold_seconds,
+            #start_time_threshold_seconds=start_time_threshold_seconds,
             show_roc=show_roc,
             activity_filter=ACTIVITY_FILTER
         )
@@ -438,7 +497,7 @@ if __name__ == "__main__":
         quick_test(
             GROUND_TRUTH_FILE, 
             predicted, 
-            start_time_threshold_seconds=start_time_threshold_seconds,
+            #start_time_threshold_seconds=start_time_threshold_seconds,
             show_roc=show_roc,
             activity_filter=ACTIVITY_FILTER
         )
@@ -452,7 +511,7 @@ if __name__ == "__main__":
             GROUND_TRUTH_FILE, 
             predicted, 
             confidence_scores, 
-            start_time_threshold_seconds=start_time_threshold_seconds
+            #start_time_threshold_seconds=start_time_threshold_seconds
         )
     
     else:

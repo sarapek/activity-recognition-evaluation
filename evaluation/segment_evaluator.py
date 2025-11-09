@@ -5,11 +5,12 @@ import pandas as pd
 from typing import List, Tuple, Dict
 import re
 import os
+from itertools import cycle
 
 class SegmentEvaluator:
     """Evaluates segment-based recognition with both frame-level and segment-level ROC"""
     
-    def __init__(self, timeline_resolution_seconds=1.0, start_time_threshold_seconds=0):
+    def __init__(self, timeline_resolution_seconds=1.0, start_time_threshold_seconds=0, overlap_threshold=0.5):
         """
         Args:
             timeline_resolution_seconds: Time resolution for timeline (default 1.0 = per second)
@@ -17,18 +18,12 @@ class SegmentEvaluator:
         """
         self.resolution = timeline_resolution_seconds
         self.start_time_threshold = start_time_threshold_seconds
-        
-        print(f"Start time threshold:     {self.start_time_threshold}")
+        self.overlap_threshold = overlap_threshold
         
     def parse_log_file(self, filepath: str) -> pd.DataFrame:
-        """Parse the log file into a structured DataFrame (space-separated format)
-        
-        Handles formats:
-        - 7 parts: date time sensor newsensor status activity confidence
-        - 6 parts: date time sensor newsensor status activity (AL output)
-        - 5 parts: date time sensor status activity (ground truth)
-        """
+        """Parse the log file into a structured DataFrame (space-separated format)"""
         data = []
+        
         with open(filepath, 'r') as f:
             for line in f:
                 parts = line.strip().split()
@@ -59,8 +54,7 @@ class SegmentEvaluator:
                             'errors': ''
                         })
                         
-                    elif len(parts) >= 6:
-                        # AL format WITHOUT confidence: date time sensor newsensor status activity
+                    elif len(parts) == 6:
                         date_str = parts[0]
                         time_str = parts[1]
                         timestamp_str = f"{date_str} {time_str}"
@@ -71,16 +65,32 @@ class SegmentEvaluator:
                             timestamp = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S')
                         
                         sensor_id = parts[2]
-                        status = parts[4]
-                        activity = parts[5]
                         
-                        data.append({
-                            'timestamp': timestamp,
-                            'event_id': sensor_id,
-                            'state': status,
-                            'annotation': activity,
-                            'errors': ''
-                        })
+                        # Check if parts[5] contains 'error' - if so, it's GT format
+                        if 'error' in parts[5].lower():
+                            # Ground truth format: date time sensor status activity errors
+                            status = parts[3]
+                            activity = parts[4]
+                            
+                            data.append({
+                                'timestamp': timestamp,
+                                'event_id': sensor_id,
+                                'state': status,
+                                'annotation': activity,
+                                'errors': parts[5]
+                            })
+                        else:
+                            # Prediction format: date time sensor newsensor status activity
+                            status = parts[4]
+                            activity = parts[5]
+                            
+                            data.append({
+                                'timestamp': timestamp,
+                                'event_id': sensor_id,
+                                'state': status,
+                                'annotation': activity,
+                                'errors': ''
+                            })
                         
                     elif len(parts) >= 5:
                         # Ground truth format: date time sensor status activity
@@ -104,123 +114,112 @@ class SegmentEvaluator:
                             'annotation': activity,
                             'errors': ''
                         })
-                except (ValueError, IndexError) as e:
+                except (ValueError, IndexError):
                     continue
 
         return pd.DataFrame(data)
 
     def extract_segments(self, df: pd.DataFrame, confidence_threshold: float = 0.0) -> List[Dict]:
-        """Extract segments from annotations (continuous activity numbers or start/end markers)
-        
-        Args:
-            df: DataFrame with annotations
-            confidence_threshold: Minimum confidence to consider a prediction valid (default 0.0 = no filtering)
-        """
+        """Extract segments from annotations"""
         segments = []
         current_activity = None
         segment_start = None
         prev_timestamp = None
         segment_confidences = []
         
+        if df is None or len(df) == 0:
+            return segments
+        
+        # ADD THIS CHECK TOO
+        if 'annotation' not in df.columns:
+            print(f"Warning: 'annotation' column not found in DataFrame. Columns: {df.columns.tolist()}")
+            return segments
+                
         for idx, row in df.iterrows():
             annotation = str(row['annotation']).strip()
+            timestamp = row['timestamp']
             
-            # Get confidence if available
             confidence = row.get('confidence', 1.0) if 'confidence' in df.columns else 1.0
             
-            # Check confidence threshold
             if confidence < confidence_threshold:
                 annotation = 'Other_Activity'
             
             # Skip empty annotations or Other_Activity
             if not annotation or annotation == 'nan' or annotation == 'Other_Activity':
-                # Close current segment if any
-                if current_activity is not None and segment_start is not None and prev_timestamp is not None:
-                    min_confidence = min(segment_confidences) if segment_confidences else 1.0
-                    mean_confidence = np.mean(segment_confidences) if segment_confidences else 1.0
-                    segments.append({
-                        'segment_id': current_activity,
-                        'start_time': segment_start,
-                        'end_time': prev_timestamp,
-                        'duration': (prev_timestamp - segment_start).total_seconds(),
-                        'confidence': mean_confidence
-                    })
-                    current_activity = None
-                    segment_start = None
-                    segment_confidences = []
-                prev_timestamp = row['timestamp']
+                prev_timestamp = timestamp
                 continue
             
-            # Extract activity ID from annotation
-            if '-start' in annotation.lower():
-                activity_id = annotation.lower().split('-start')[0].strip()
-                if current_activity is not None and segment_start is not None and prev_timestamp is not None:
-                    min_confidence = min(segment_confidences) if segment_confidences else 1.0
-                    mean_confidence = np.mean(segment_confidences) if segment_confidences else 1.0
-                    segments.append({
-                        'segment_id': current_activity,
-                        'start_time': segment_start,
-                        'end_time': prev_timestamp,
-                        'duration': (prev_timestamp - segment_start).total_seconds(),
-                        'confidence': mean_confidence
-                    })
-                current_activity = activity_id
-                segment_start = row['timestamp']
-                segment_confidences = [confidence]
+            # Handle comma-separated annotations (e.g., "1.4,1-end")
+            annotations = [a.strip() for a in annotation.split(',')]
             
-            elif '-end' in annotation.lower():
-                activity_id = annotation.lower().split('-end')[0].strip()
-                if current_activity == activity_id and segment_start is not None:
-                    segment_confidences.append(confidence)
-                    min_confidence = min(segment_confidences) if segment_confidences else 1.0
-                    mean_confidence = np.mean(segment_confidences) if segment_confidences else 1.0
-                    segments.append({
-                        'segment_id': current_activity,
-                        'start_time': segment_start,
-                        'end_time': row['timestamp'],
-                        'duration': (row['timestamp'] - segment_start).total_seconds(),
-                        'confidence': mean_confidence
-                    })
-                    current_activity = None
-                    segment_start = None
-                    segment_confidences = []
-            
-            else:
-                # Continuous activity label (e.g., "1", "2", "1.1")
-                match = re.match(r'^(\d+)', annotation)
-                if match:
-                    activity_id = match.group(1)
+            for ann in annotations:
+                if '-end' in ann.lower():
+                    activity_id = ann.lower().split('-end')[0].strip()
                     
-                    if activity_id != current_activity:
-                        if current_activity is not None and segment_start is not None and prev_timestamp is not None:
-                            min_confidence = min(segment_confidences) if segment_confidences else 1.0
-                            mean_confidence = np.mean(segment_confidences) if segment_confidences else 1.0
-                            segments.append({
-                                'segment_id': current_activity,
-                                'start_time': segment_start,
-                                'end_time': prev_timestamp,
-                                'duration': (prev_timestamp - segment_start).total_seconds(),
-                                'confidence': mean_confidence
-                            })
-                        current_activity = activity_id
-                        segment_start = row['timestamp']
-                        segment_confidences = [confidence]
-                    else:
-                        # Continue current segment
+                    if current_activity == activity_id and segment_start is not None:
                         segment_confidences.append(confidence)
+                        first_confidence = segment_confidences[0] if segment_confidences else 1.0
+                        segments.append({
+                            'segment_id': current_activity,
+                            'start_time': segment_start,
+                            'end_time': timestamp,
+                            'duration': (timestamp - segment_start).total_seconds(),
+                            'confidence': first_confidence
+                        })
+                        current_activity = None
+                        segment_start = None
+                        segment_confidences = []
+                
+                elif '-start' in ann.lower():
+                    activity_id = ann.lower().split('-start')[0].strip()
+                    
+                    if current_activity is not None and segment_start is not None:
+                        first_confidence = segment_confidences[0] if segment_confidences else 1.0
+                        segments.append({
+                            'segment_id': current_activity,
+                            'start_time': segment_start,
+                            'end_time': timestamp,
+                            'duration': (timestamp - segment_start).total_seconds(),
+                            'confidence': first_confidence
+                        })
+                    
+                    current_activity = activity_id
+                    segment_start = timestamp
+                    segment_confidences = [confidence]
+                
+                else:
+                    # Continuous activity label
+                    match = re.match(r'^(\d+)', ann)
+                    if match:
+                        activity_id = match.group(1)
+                        
+                        if activity_id != current_activity:
+                            if current_activity is not None and segment_start is not None and prev_timestamp is not None:
+                                first_confidence = segment_confidences[0] if segment_confidences else 1.0
+                                segments.append({
+                                    'segment_id': current_activity,
+                                    'start_time': segment_start,
+                                    'end_time': prev_timestamp,
+                                    'duration': (prev_timestamp - segment_start).total_seconds(),
+                                    'confidence': first_confidence
+                                })
+                            current_activity = activity_id
+                            segment_start = timestamp
+                            segment_confidences = [confidence]
+                        else:
+                            segment_confidences.append(confidence)
             
-            prev_timestamp = row['timestamp']
+            prev_timestamp = timestamp
         
         # Close any remaining open segment
         if current_activity is not None and segment_start is not None and prev_timestamp is not None:
-            min_confidence = min(segment_confidences) if segment_confidences else 1.0
-            mean_confidence = np.mean(segment_confidences) if segment_confidences else 1.0
+            first_confidence = segment_confidences[0] if segment_confidences else 1.0
             segments.append({
                 'segment_id': current_activity,
                 'start_time': segment_start,
                 'end_time': prev_timestamp,
                 'duration': (prev_timestamp - segment_start).total_seconds(),
-                'confidence': mean_confidence
+                'confidence': first_confidence
             })
         
         return segments
@@ -235,10 +234,9 @@ class SegmentEvaluator:
             end_time: End of timeline
             
         Returns:
-            timeline: Array where timeline[t] = activity_id at time t (or None)
+            timeline: Array where timeline[t] = activity_id at time t (or empty string)
             activity_classes: List of all unique activity IDs found
         """
-        # Calculate timeline length in resolution units
         total_seconds = (end_time - start_time).total_seconds()
         timeline_length = int(total_seconds / self.resolution)
         
@@ -250,7 +248,6 @@ class SegmentEvaluator:
         
         # Fill timeline with activities
         for seg in segments:
-            # Convert timestamps to indices
             start_idx = int((seg['start_time'] - start_time).total_seconds() / self.resolution)
             end_idx = int((seg['end_time'] - start_time).total_seconds() / self.resolution)
             
@@ -258,7 +255,6 @@ class SegmentEvaluator:
             start_idx = max(0, min(start_idx, timeline_length))
             end_idx = max(0, min(end_idx, timeline_length))
             
-            # Fill this segment
             timeline[start_idx:end_idx] = seg['segment_id']
         
         return timeline, activity_classes
@@ -274,14 +270,6 @@ class SegmentEvaluator:
             TP_c = duration where both predict class c
             FP_c = duration where prediction is c but GT is not c
             FN_c = duration where GT is c but prediction is not c
-        
-        Args:
-            pred_timeline: Predicted activity at each time point
-            gt_timeline: Ground truth activity at each time point
-            activity_classes: List of activity class IDs
-            
-        Returns:
-            Dictionary with per-class and aggregate metrics
         """
         per_class_metrics = {}
         
@@ -318,12 +306,12 @@ class SegmentEvaluator:
         
         # Calculate aggregate metrics
         
-        # Macro-average (simple average across classes)
+        # Macro-average
         macro_precision = np.mean([m['precision'] for m in per_class_metrics.values()])
         macro_recall = np.mean([m['recall'] for m in per_class_metrics.values()])
         macro_f1 = np.mean([m['f1_score'] for m in per_class_metrics.values()])
         
-        # Micro-average (pool all TP/FP/FN across classes)
+        # Micro-average
         total_TP = sum(m['TP_duration'] for m in per_class_metrics.values())
         total_FP = sum(m['FP_duration'] for m in per_class_metrics.values())
         total_FN = sum(m['FN_duration'] for m in per_class_metrics.values())
@@ -332,7 +320,7 @@ class SegmentEvaluator:
         micro_recall = total_TP / (total_TP + total_FN) if (total_TP + total_FN) > 0 else 0.0
         micro_f1 = 2 * (micro_precision * micro_recall) / (micro_precision + micro_recall) if (micro_precision + micro_recall) > 0 else 0.0
         
-        # Weighted-average (weighted by ground truth duration)
+        # Weighted-average
         total_gt_duration = sum(m['gt_total_duration'] for m in per_class_metrics.values())
         if total_gt_duration > 0:
             weighted_precision = sum(m['precision'] * m['gt_total_duration'] for m in per_class_metrics.values()) / total_gt_duration
@@ -365,79 +353,163 @@ class SegmentEvaluator:
             }
         }
     
-    def calculate_segment_roc_auc_per_class(self, pred_segments: List[Dict], gt_segments: List[Dict]) -> Dict:
-        """
-        Calculate segment-level ROC and AUC for each activity class
+    def calculate_segment_roc_auc_per_class(self, pred_segments, gt_segments, overlap_threshold=None):
+        """Calculate segment-level ROC and AUC for each activity class"""
         
-        Uses the confidence score associated with each predicted segment.
+        if overlap_threshold is None:
+            overlap_threshold = self.overlap_threshold
         
-        Args:
-            pred_segments: List of predicted segments with confidence scores
-            gt_segments: List of ground truth segments
-            
-        Returns:
-            Dictionary with per-class ROC curves and AUC scores
-        """
-        from sklearn.metrics import roc_curve, auc
-        
-        # Get all activity classes
         activity_classes = set()
         for seg in pred_segments + gt_segments:
             activity_classes.add(seg['segment_id'])
         activity_classes = sorted(list(activity_classes))
-        
-        roc_auc_results = {}
-        
-        for activity_id in activity_classes:
-            # Get ground truth segments for this activity
-            gt_activity_segments = [seg for seg in gt_segments if seg['segment_id'] == activity_id]
             
-            # Get predicted segments for this activity
+        roc_auc_results = {}
+            
+        for activity_id in activity_classes:
+            gt_activity_segments = [seg for seg in gt_segments if seg['segment_id'] == activity_id]
             pred_activity_segments = [seg for seg in pred_segments if seg['segment_id'] == activity_id]
             
             if len(gt_activity_segments) == 0:
-                # No ground truth for this activity
                 roc_auc_results[activity_id] = {'auc': None}
                 continue
             
-            # Create binary labels and confidence scores
-            # Strategy: Match predicted segments to ground truth segments
+            # Temporal overlap check
+            print(f"\n{'='*80}")
+            print(f"CHECKING TEMPORAL OVERLAP FOR ACTIVITY {activity_id}")
+            print(f"{'='*80}")
+
+            if len(pred_activity_segments) > 0:
+                # Get time ranges
+                gt_times = [(seg['start_time'], seg['end_time']) for seg in gt_activity_segments]
+                pred_times = [(seg['start_time'], seg['end_time']) for seg in pred_activity_segments]
+                
+                gt_min = min(t[0] for t in gt_times)
+                gt_max = max(t[1] for t in gt_times)
+                pred_min = min(t[0] for t in pred_times)
+                pred_max = max(t[1] for t in pred_times)
+                
+                print(f"GT time span:   {gt_min} to {gt_max}")
+                print(f"Pred time span: {pred_min} to {pred_max}")
+                print(f"Days match: {gt_min.date() == pred_min.date()}")
+                
+                # Check if ANY temporal overlap exists
+                global_overlap = not (gt_max < pred_min or pred_max < gt_min)
+                print(f"Global temporal overlap exists: {global_overlap}")
+                
+                if not global_overlap:
+                    print(f"⚠️ WARNING: Predictions and GT are in completely different time periods!")
+            
+            print(f"\n{'='*80}")
+            print(f"ACTIVITY {activity_id} - OVERLAP THRESHOLD = {overlap_threshold}")
+            print(f"{'='*80}")
+            
             y_true = []
             y_scores = []
+            matched_pred_indices = set()
             
-            # For each ground truth segment, find if there's a matching prediction
-            for gt_seg in gt_segments:
-                is_target_class = 1 if gt_seg['segment_id'] == activity_id else 0
-                
-                # Find overlapping predicted segment with highest confidence
+            # Step 1: For each GT segment, find best matching prediction
+            for gt_idx, gt_seg in enumerate(gt_activity_segments):
                 best_confidence = 0.0
-                best_match = None
+                best_overlap_ratio = 0.0
+                best_pred_idx = None
                 
-                for pred_seg in pred_segments:
-                    # Check if segments overlap
+                gt_duration = gt_seg['duration']
+                
+                print(f"\n--- GT Segment {gt_idx} ---")
+                print(f"  GT: {gt_seg['start_time'].strftime('%H:%M:%S')} -> {gt_seg['end_time'].strftime('%H:%M:%S')} ({gt_duration:.1f}s)")
+                
+                # Track all overlaps for this GT segment
+                overlaps_found = []
+                
+                for pred_idx, pred_seg in enumerate(pred_activity_segments):
                     overlap_start = max(gt_seg['start_time'], pred_seg['start_time'])
                     overlap_end = min(gt_seg['end_time'], pred_seg['end_time'])
                     
                     if overlap_start < overlap_end:
-                        # Segments overlap
-                        if pred_seg['segment_id'] == activity_id:
-                            # Predicted as target class
+                        overlap_duration = (overlap_end - overlap_start).total_seconds()
+                        pred_duration = pred_seg['duration']
+                        
+                        if gt_duration is not None and gt_duration > 0:
+                            overlap_ratio = overlap_duration / gt_duration
+                            
                             confidence = pred_seg.get('confidence', 0.5)
-                            if confidence > best_confidence:
-                                best_confidence = confidence
-                                best_match = pred_seg
+                            if confidence is None:
+                                confidence = 0.5
+                            
+                            # Store this overlap for debugging
+                            overlaps_found.append({
+                                'pred_idx': pred_idx,
+                                'pred_start': pred_seg['start_time'],
+                                'pred_end': pred_seg['end_time'],
+                                'pred_duration': pred_duration,
+                                'overlap_duration': overlap_duration,
+                                'overlap_ratio': overlap_ratio,
+                                'confidence': confidence,
+                                'meets_threshold': overlap_ratio >= overlap_threshold
+                            })
+                            
+                            if overlap_ratio >= overlap_threshold:
+                                if overlap_ratio > best_overlap_ratio or \
+                                (overlap_ratio == best_overlap_ratio and confidence > best_confidence):
+                                    best_confidence = confidence
+                                    best_overlap_ratio = overlap_ratio
+                                    best_pred_idx = pred_idx
                 
-                y_true.append(is_target_class)
-                y_scores.append(best_confidence)
+                # Print all overlaps for this GT segment
+                if len(overlaps_found) > 0:
+                    print(f"  Found {len(overlaps_found)} overlapping predictions:")
+                    for i, ov in enumerate(overlaps_found[:5]):  # Show first 5
+                        meets = "✓ MATCH" if ov['meets_threshold'] else "✗ below threshold"
+                        print(f"    Pred {ov['pred_idx']}: {ov['pred_start'].strftime('%H:%M:%S')}->{ov['pred_end'].strftime('%H:%M:%S')} "
+                            f"overlap={ov['overlap_duration']:.1f}s ratio={ov['overlap_ratio']:.4f} conf={ov['confidence']:.3f} {meets}")
+                    if len(overlaps_found) > 5:
+                        print(f"    ... and {len(overlaps_found) - 5} more")
+                else:
+                    print(f"  No overlapping predictions found")
+                
+                # Record result
+                if best_overlap_ratio >= overlap_threshold:
+                    print(f"  → BEST MATCH: Pred {best_pred_idx}, ratio={best_overlap_ratio:.4f}, conf={best_confidence:.3f} ✓ TP")
+                    y_true.append(1)
+                    y_scores.append(best_confidence)
+                    matched_pred_indices.add(best_pred_idx)
+                else:
+                    print(f"  → NO MATCH (best ratio={best_overlap_ratio:.4f} < threshold={overlap_threshold}) ✗ FN")
+                    y_true.append(0)
+                    y_scores.append(0.0)
             
-            # Only calculate if we have both positive and negative samples AND varied scores
+            # Step 2: Add FALSE POSITIVES
+            unmatched_count = 0
+            for pred_idx, pred_seg in enumerate(pred_activity_segments):
+                if pred_idx not in matched_pred_indices:
+                    y_true.append(0)
+                    confidence = pred_seg.get('confidence', 0.5)
+                    if confidence is None:
+                        confidence = 0.5
+                    y_scores.append(confidence)
+                    unmatched_count += 1
+            
+            print(f"\n--- Summary for Activity {activity_id} ---")
+            print(f"  GT segments: {len(gt_activity_segments)}")
+            print(f"  Pred segments: {len(pred_activity_segments)}")
+            print(f"  Matched predictions: {len(matched_pred_indices)}")
+            print(f"  Unmatched predictions (FPs): {unmatched_count}")
+            print(f"  Overlap threshold: {overlap_threshold}")
+            
             y_true = np.array(y_true)
             y_scores = np.array(y_scores)
             
+            print(f"  Total data points: {len(y_true)}")
+            print(f"  TPs: {sum(y_true)}")
+            print(f"  FPs+FNs: {len(y_true) - sum(y_true)}")
+            print(f"  Unique scores: {len(np.unique(y_scores))}")
+                        
             if len(np.unique(y_true)) > 1 and len(np.unique(y_scores)) > 1:
                 try:
                     fpr, tpr, thresholds = roc_curve(y_true, y_scores)
                     roc_auc = auc(fpr, tpr)
+                    print(f"  → AUC: {roc_auc:.4f}")
                     
                     roc_auc_results[activity_id] = {
                         'auc': roc_auc,
@@ -446,30 +518,128 @@ class SegmentEvaluator:
                         'thresholds': thresholds
                     }
                 except Exception as e:
-                    print(f"Warning: Could not calculate segment ROC/AUC for class {activity_id}: {e}")
+                    print(f"  Warning: Could not calculate ROC/AUC: {e}")
                     roc_auc_results[activity_id] = {'auc': None}
             else:
+                print(f"  → Not enough variation for AUC")
                 roc_auc_results[activity_id] = {'auc': None}
         
         return roc_auc_results
     
-    def calculate_roc_auc_per_class(self,
-                                pred_timeline: np.ndarray,
-                                gt_timeline: np.ndarray,
-                                pred_confidence_timeline: np.ndarray,
-                                activity_classes: List[str]) -> Dict:
+    def create_true_frame_level_timeline_from_events(self, 
+                                          pred_df: pd.DataFrame,
+                                          start_time: datetime,
+                                          end_time: datetime,
+                                          aggregation='average') -> Tuple[np.ndarray, np.ndarray]:
         """
-        Calculate frame-level ROC and AUC for each activity class
+        Create frame-level timeline by carrying forward predictions between events
         
-        Args:
-            pred_timeline: Predicted activity at each time point
-            gt_timeline: Ground truth activity at each time point
-            pred_confidence_timeline: Confidence score at each time point
-            activity_classes: List of activity class IDs
-            
-        Returns:
-            Dictionary with per-class ROC curves and AUC scores
+        Uses carry-forward logic: each prediction persists until the next event.
+        This matches how GT timelines are created from segments.
         """
+        total_seconds = (end_time - start_time).total_seconds()
+        timeline_length = int(total_seconds / self.resolution)
+        
+        # Initialize timelines
+        activity_timeline = np.array(['None'] * timeline_length, dtype=object)
+        confidence_timeline = np.zeros(timeline_length, dtype=float)
+        
+        # Sort events by timestamp
+        pred_df = pred_df.sort_values('timestamp').reset_index(drop=True)
+                
+        # Track current state (carry-forward)
+        current_activity = None
+        current_confidence = 0.0
+        
+        for idx, row in pred_df.iterrows():
+            timestamp = row['timestamp']
+            annotation = str(row['annotation']).strip()
+            
+            # Skip invalid annotations
+            if not annotation or annotation == 'nan' or annotation == 'Other_Activity':
+                continue
+            
+            # Get confidence
+            confidence = row.get('confidence', 1.0) if 'confidence' in pred_df.columns else 1.0
+            
+            # Extract activity ID from annotation
+            activity_id = None
+            
+            # Handle comma-separated annotations
+            annotations = [a.strip() for a in annotation.split(',')]
+            
+            for ann in annotations:
+                if '-start' in ann.lower():
+                    activity_id = ann.lower().split('-start')[0].strip()
+                    current_activity = activity_id
+                    current_confidence = confidence
+                    break
+                elif '-end' in ann.lower():
+                    activity_id = ann.lower().split('-end')[0].strip()
+                    # End marker - stop carrying forward this activity
+                    if current_activity == activity_id:
+                        current_activity = None
+                        current_confidence = 0.0
+                    break
+                else:
+                    # Continuous label
+                    match = re.match(r'^(\d+)', ann)
+                    if match:
+                        activity_id = match.group(1)
+                        current_activity = activity_id
+                        current_confidence = confidence
+                        break
+            
+            # Calculate frame index
+            elapsed = (timestamp - start_time).total_seconds()
+            frame_idx = int(elapsed / self.resolution)
+            
+            # Clip to valid range
+            if frame_idx < 0 or frame_idx >= timeline_length:
+                continue
+            
+            # Fill from this frame until next event (carry-forward)
+            if idx < len(pred_df) - 1:
+                next_timestamp = pred_df.iloc[idx + 1]['timestamp']
+                next_elapsed = (next_timestamp - start_time).total_seconds()
+                end_frame = int(next_elapsed / self.resolution)
+            else:
+                # Last event - carry forward to end of timeline
+                end_frame = timeline_length
+            
+            # Clip end frame
+            end_frame = min(end_frame, timeline_length)
+            
+            # Fill frames with current state
+            if current_activity is not None and frame_idx < end_frame:
+                activity_timeline[frame_idx:end_frame] = current_activity
+                confidence_timeline[frame_idx:end_frame] = current_confidence
+                
+        return activity_timeline, confidence_timeline
+    
+    def calculate_roc_auc_per_class(self,
+                                    pred_df: pd.DataFrame,
+                                    gt_timeline: np.ndarray,
+                                    start_time: datetime,
+                                    end_time: datetime,
+                                    activity_classes: List[str],
+                                    aggregation='average') -> Dict:
+        """
+        Calculate TRUE frame-level ROC and AUC for each activity class
+        
+        Uses carry-forward approach for sparse predictions.
+        """
+        # Create TRUE frame-level timeline from events
+        pred_timeline, pred_confidence_timeline = self.create_true_frame_level_timeline_from_events(
+            pred_df, start_time, end_time, aggregation=aggregation
+        )
+        
+        if len(pred_timeline) != len(gt_timeline):
+            min_len = min(len(pred_timeline), len(gt_timeline))
+            pred_timeline = pred_timeline[:min_len]
+            pred_confidence_timeline = pred_confidence_timeline[:min_len]
+            gt_timeline = gt_timeline[:min_len]
+        
         roc_auc_results = {}
         
         for activity_id in activity_classes:
@@ -477,23 +647,14 @@ class SegmentEvaluator:
             y_true = (gt_timeline == activity_id).astype(int)
             
             # Get confidence scores where this class was predicted
-            # Convert confidence timeline to float, treating non-numeric as 0.0
             y_scores = np.zeros(len(pred_confidence_timeline))
             for i in range(len(pred_confidence_timeline)):
                 if pred_timeline[i] == activity_id:
-                    # This frame predicted this activity
-                    conf_val = pred_confidence_timeline[i]
-                    try:
-                        y_scores[i] = float(conf_val) if conf_val else 0.0
-                    except (ValueError, TypeError):
-                        y_scores[i] = 0.0
-                else:
-                    y_scores[i] = 0.0
+                    y_scores[i] = pred_confidence_timeline[i]
             
             # Only calculate if we have both positive and negative samples AND varied scores
             if len(np.unique(y_true)) > 1 and len(np.unique(y_scores)) > 1:
                 try:
-                    from sklearn.metrics import roc_curve, auc
                     fpr, tpr, thresholds = roc_curve(y_true, y_scores)
                     roc_auc = auc(fpr, tpr)
                     
@@ -511,42 +672,49 @@ class SegmentEvaluator:
         
         return roc_auc_results
     
-    def create_confidence_timeline(self, segments: List[Dict], confidence_scores: List[float],
-                                   start_time: datetime, end_time: datetime) -> np.ndarray:
+    def validate_frame_level_roc(self, activity_timeline, confidence_timeline, verbose=True):
         """
-        Create timeline of confidence scores
+        Validate that the timeline represents TRUE frame-level (not segment-level)
         
-        Args:
-            segments: List of predicted segments
-            confidence_scores: Confidence score for each segment
-            start_time: Start of timeline
-            end_time: End of timeline
-            
-        Returns:
-            confidence_timeline: Array of confidence scores at each time point
+        Checks if confidence varies within continuous activity segments.
         """
-        total_seconds = (end_time - start_time).total_seconds()
-        timeline_length = int(total_seconds / self.resolution)
+        segments_with_variation = 0
+        segments_constant = 0
         
-        confidence_timeline = np.zeros(timeline_length)
+        # Find continuous segments
+        current_activity = None
+        segment_confidences = []
         
-        if confidence_scores is None or len(confidence_scores) == 0:
-            return confidence_timeline
+        for i in range(len(activity_timeline)):
+            if activity_timeline[i] != current_activity:
+                # Segment boundary - analyze previous segment
+                if len(segment_confidences) > 1:
+                    confidences = np.array(segment_confidences)
+                    confidences = confidences[confidences > 0]
+                    
+                    if len(confidences) > 1:
+                        std_dev = np.std(confidences)
+                        if std_dev < 1e-6:
+                            segments_constant += 1
+                        else:
+                            segments_with_variation += 1
+                
+                current_activity = activity_timeline[i]
+                segment_confidences = [confidence_timeline[i]]
+            else:
+                segment_confidences.append(confidence_timeline[i])
         
-        for seg, conf in zip(segments, confidence_scores):
-            start_idx = int((seg['start_time'] - start_time).total_seconds() / self.resolution)
-            end_idx = int((seg['end_time'] - start_time).total_seconds() / self.resolution)
+        if verbose:
+            print(f"\nFrame-Level ROC Validation:")
+            print(f"  Segments with varying confidence: {segments_with_variation}")
+            print(f"  Segments with constant confidence: {segments_constant}")
             
-            start_idx = max(0, min(start_idx, timeline_length))
-            end_idx = max(0, min(end_idx, timeline_length))
-            
-            # Use maximum confidence if overlapping predictions
-            confidence_timeline[start_idx:end_idx] = np.maximum(
-                confidence_timeline[start_idx:end_idx],
-                conf
-            )
-        
-        return confidence_timeline
+            if segments_with_variation > 0:
+                print(f"[OK] TRUE frame-level: Confidence varies within segments!")
+            else:
+                print(f"[WARNING] Appears to be segment-level (constant confidence)")
+                
+        return segments_with_variation > 0
     
     def segment_overlap(self, seg1: Tuple[float, float], seg2: Tuple[float, float]) -> float:
         """Calculate overlap duration between two segments"""
@@ -554,441 +722,51 @@ class SegmentEvaluator:
         s2, e2 = seg2
         return max(0, min(e1, e2) - max(s1, s2))
     
-    def calculate_segment_based_roc(self,
-                                pred_segments: List[Dict],
-                                gt_segments: List[Dict],
-                                confidence_scores: List[float],
-                                activity_classes: List[str],
-                                overlap_threshold: float = 0.5) -> Dict:
-        """Calculate segment-level ROC curves using sklearn's roc_curve for robustness"""
-        from sklearn.metrics import roc_curve, auc
-        
-        roc_results = {}
-        
-        for activity_id in activity_classes:
-            # Filter segments for this activity
-            gt_segs_class = [s for s in gt_segments if s['segment_id'] == activity_id]
-            pred_segs_class = [(s, conf) for s, conf in zip(pred_segments, confidence_scores) 
-                            if s['segment_id'] == activity_id]
-            
-            if len(gt_segs_class) == 0:
-                roc_results[activity_id] = {'auc': None}
-                continue
-            
-            # Build arrays of predictions and labels
-            y_true = []  # 1 for TP, 0 for FP
-            y_scores = []  # confidence scores
-            
-            for pred_seg, confidence in pred_segs_class:
-                pred_interval = (
-                    pred_seg['start_time'].timestamp(),
-                    pred_seg['end_time'].timestamp()
-                )
-                pred_dur = pred_seg['duration']
-                
-                # Find maximum overlap with any GT segment
-                max_overlap = 0
-                best_match_gt = None
-                for gt_seg in gt_segs_class:
-                    gt_interval = (
-                        gt_seg['start_time'].timestamp(),
-                        gt_seg['end_time'].timestamp()
-                    )
-                    overlap = self.segment_overlap(pred_interval, gt_interval)
-                    if overlap > max_overlap:
-                        max_overlap = overlap
-                        best_match_gt = gt_seg
-                
-                # Determine if TP or FP
-                is_valid_match = False
-                if pred_dur > 0 and (max_overlap / pred_dur) >= overlap_threshold:
-                    if self.start_time_threshold > 0 and best_match_gt is not None:
-                        start_time_diff = abs((pred_seg['start_time'] - best_match_gt['start_time']).total_seconds())
-                        if start_time_diff <= self.start_time_threshold:
-                            is_valid_match = True
-                    else:
-                        is_valid_match = True
-                
-                y_true.append(1 if is_valid_match else 0)
-                y_scores.append(confidence)
-            
-            # Calculate ROC curve using sklearn (handles sorting automatically)
-            if len(y_true) > 0 and len(set(y_true)) > 1:  # Need both classes
-                try:
-                    fpr, tpr, thresholds = roc_curve(y_true, y_scores)
-                    roc_auc = auc(fpr, tpr)
-                    
-                    roc_results[activity_id] = {
-                        'auc': roc_auc,
-                        'fpr': fpr,
-                        'tpr': tpr,
-                        'thresholds': thresholds
-                    }
-                except Exception as e:
-                    print(f"Warning: Could not calculate ROC for activity {activity_id}: {e}")
-                    roc_results[activity_id] = {'auc': None}
-            else:
-                # Not enough data for ROC curve
-                roc_results[activity_id] = {'auc': None}
-        
-        return roc_results
-
-    def create_segment_based_confidence_timeline(self, pred_segments, start_time, end_time):
+    def evaluate_segments(self,
+                         predicted_segments: List[Dict],
+                         ground_truth_segments: List[Dict]) -> Dict:
         """
-        Create confidence timeline from segments (not individual events)
-        
-        Args:
-            pred_segments: List of predicted segments (dicts with 'confidence', 'start_time', 'end_time')
-            start_time: Start of timeline
-            end_time: End of timeline
-            
-        Returns:
-            confidence_timeline: Array of confidence scores at each time point
+        Evaluate segments directly without reading files
         """
-        total_seconds = (end_time - start_time).total_seconds()
-        timeline_length = int(total_seconds / self.resolution)
+        if len(predicted_segments) == 0 or len(ground_truth_segments) == 0:
+            print("Warning: No segments provided")
+            return {}
         
-        confidence_timeline = np.zeros(timeline_length, dtype=float)
+        # Determine timeline bounds
+        all_times = []
+        for seg in predicted_segments + ground_truth_segments:
+            all_times.extend([seg['start_time'], seg['end_time']])
         
-        # Fill timeline with segment-level confidences
-        for seg in pred_segments:
-            if not isinstance(seg, dict):
-                continue
-            
-            confidence = seg.get('confidence', 1.0)
-            seg_start = seg.get('start_time')
-            seg_end = seg.get('end_time')
-            
-            if seg_start is None or seg_end is None:
-                continue
-            
-            start_idx = int((seg_start - start_time).total_seconds() / self.resolution)
-            end_idx = int((seg_end - start_time).total_seconds() / self.resolution)
-            
-            start_idx = max(0, min(start_idx, timeline_length))
-            end_idx = max(0, min(end_idx, timeline_length))
-            
-            if start_idx < end_idx:
-                confidence_timeline[start_idx:end_idx] = np.maximum(
-                    confidence_timeline[start_idx:end_idx],
-                    confidence
-                )
+        start_time = min(all_times)
+        end_time = max(all_times)
         
-        return confidence_timeline
-    
-    def calculate_segment_based_roc_multi_timeline(self,
-                                               all_pred_segments: List[List[Dict]],
-                                               all_gt_segments: List[List[Dict]],
-                                               all_confidence_scores: List[List[float]],
-                                               activity_classes: List[str],
-                                               overlap_threshold: float = 0.5) -> Dict:
-        """
-        Calculate segment-level ROC curves across multiple timelines using sklearn
+        # Create timelines
+        pred_timeline, pred_classes = self.create_timeline(predicted_segments, start_time, end_time)
+        gt_timeline, gt_classes = self.create_timeline(ground_truth_segments, start_time, end_time)
         
-        This properly handles multiple recording sessions by evaluating each timeline
-        separately and then pooling the results.
+        all_classes = sorted(list(set(pred_classes + gt_classes)))
         
-        Args:
-            all_pred_segments: List of predicted segment lists (one per timeline)
-            all_gt_segments: List of GT segment lists (one per timeline)
-            all_confidence_scores: List of confidence score lists (one per timeline)
-            activity_classes: List of activity class IDs
-            overlap_threshold: Minimum overlap ratio to count as TP (default 0.5)
-            
-        Returns:
-            Dictionary with per-class segment-level ROC curves and AUC
-        """
-        from sklearn.metrics import roc_curve, auc
+        # Calculate metrics
+        results = self.calculate_time_continuous_metrics(pred_timeline, gt_timeline, all_classes)
         
-        roc_results = {}
-        
-        for activity_id in activity_classes:
-            # Collect all predictions and labels for this activity across all timelines
-            y_true = []  # 1 for TP, 0 for FP
-            y_scores = []  # confidence scores
-            
-            for timeline_idx in range(len(all_pred_segments)):
-                pred_segments = all_pred_segments[timeline_idx]
-                gt_segments = all_gt_segments[timeline_idx]
-                confidence_scores = all_confidence_scores[timeline_idx]
-                
-                # Filter for this activity
-                gt_segs_class = [s for s in gt_segments if s['segment_id'] == activity_id]
-                pred_segs_class = [(s, conf) for s, conf in zip(pred_segments, confidence_scores) 
-                                if s['segment_id'] == activity_id]
-                
-                # Process each prediction in this timeline
-                for pred_seg, confidence in pred_segs_class:
-                    pred_interval = (
-                        pred_seg['start_time'].timestamp(),
-                        pred_seg['end_time'].timestamp()
-                    )
-                    pred_dur = pred_seg['duration']
-                    
-                    # Find best match in this timeline's GT
-                    max_overlap = 0
-                    best_match_gt = None
-                    for gt_seg in gt_segs_class:
-                        gt_interval = (
-                            gt_seg['start_time'].timestamp(),
-                            gt_seg['end_time'].timestamp()
-                        )
-                        overlap = self.segment_overlap(pred_interval, gt_interval)
-                        if overlap > max_overlap:
-                            max_overlap = overlap
-                            best_match_gt = gt_seg
-                    
-                    # Check if this prediction is TP or FP
-                    is_valid_match = False
-                    if pred_dur > 0 and (max_overlap / pred_dur) >= overlap_threshold:
-                        # Check start time threshold if specified
-                        if self.start_time_threshold > 0 and best_match_gt is not None:
-                            start_time_diff = abs((pred_seg['start_time'] - best_match_gt['start_time']).total_seconds())
-                            if start_time_diff <= self.start_time_threshold:
-                                is_valid_match = True
-                        else:
-                            is_valid_match = True
-                    
-                    # Store label and score
-                    y_true.append(1 if is_valid_match else 0)
-                    y_scores.append(confidence)
-            
-            # Calculate ROC curve using sklearn
-            if len(y_true) > 0 and len(set(y_true)) > 1:  # Need both classes
-                try:
-                    fpr, tpr, thresholds = roc_curve(y_true, y_scores)
-                    roc_auc = auc(fpr, tpr)
-                    
-                    roc_results[activity_id] = {
-                        'auc': roc_auc,
-                        'fpr': fpr,
-                        'tpr': tpr,
-                        'thresholds': thresholds
-                    }
-                except Exception as e:
-                    print(f"Warning: Could not calculate ROC for activity {activity_id}: {e}")
-                    roc_results[activity_id] = {'auc': None}
-            else:
-                # Not enough data for ROC curve
-                if len(y_true) > 0:
-                    print(f"Activity {activity_id}: Only one class present ({len([x for x in y_true if x == 1])} TPs, {len([x for x in y_true if x == 0])} FPs)")
-                roc_results[activity_id] = {'auc': None}
-        
-        return roc_results
-    
-    def evaluate_multiple_files(self, predicted_files: List[str], ground_truth_files: List[str]) -> Dict:
-        """
-        Evaluate predictions across multiple files
-        
-        Args:
-            predicted_files: List of paths to prediction files
-            ground_truth_files: List of paths to ground truth files
-            
-        Returns:
-            Dictionary containing aggregated metrics and per-file results
-        """
-        if len(predicted_files) != len(ground_truth_files):
-            raise ValueError("Number of prediction and ground truth files must match")
-        
-        print(f"\nEvaluating {len(predicted_files)} files...")
-        
-        # Storage for aggregated data
-        all_pred_segments = []
-        all_gt_segments = []
-        per_file_results = []
-        
-        # Store per-file timelines for cumulative ROC calculation
-        all_file_pred_timelines = []
-        all_file_gt_timelines = []
-        all_file_confidence_timelines = []
-        
-        # Get activity classes from all files
-        activity_classes_set = set()
-        
-        # Process each file
-        for file_idx, (pred_file, gt_file) in enumerate(zip(predicted_files, ground_truth_files)):
-            # Parse files
-            pred_df = self.parse_log_file(pred_file)
-            gt_df = self.parse_log_file(gt_file)
-            
-            # Extract segments
-            pred_segments = self.extract_segments(pred_df)
-            gt_segments = self.extract_segments(gt_df)
-            
-            # Collect activity classes
-            for seg in pred_segments + gt_segments:
-                activity_classes_set.add(seg['segment_id'])
-            
-            # Skip if no segments
-            if len(pred_segments) == 0 and len(gt_segments) == 0:
-                continue
-            
-            # Get timeline bounds for THIS file
-            all_times = []
-            for seg in pred_segments + gt_segments:
-                all_times.extend([seg['start_time'], seg['end_time']])
-            
-            if not all_times:
-                continue
-            
-            file_start_time = min(all_times)
-            file_end_time = max(all_times)
-            
-            # Get activity classes for this specific file
-            file_classes = sorted(list(set([s['segment_id'] for s in pred_segments + gt_segments])))
-            
-            # Create timelines for THIS file
-            file_pred_timeline, _ = self.create_timeline(pred_segments, file_start_time, file_end_time)
-            file_gt_timeline, _ = self.create_timeline(gt_segments, file_start_time, file_end_time)
-            
-            # Create segment-based confidence timeline for THIS file
-            file_conf_timeline = self.create_segment_based_confidence_timeline(
-                pred_segments,
-                file_start_time,
-                file_end_time
-            )
-            
-            # Calculate per-file frame-level ROC
-            frame_roc_file = self.calculate_roc_auc_per_class(
-                file_pred_timeline,
-                file_gt_timeline,
-                file_conf_timeline,
-                file_classes
-            )
-            
-            # Store timelines for cumulative calculation
-            all_file_pred_timelines.append(file_pred_timeline)
-            all_file_gt_timelines.append(file_gt_timeline)
-            all_file_confidence_timelines.append(file_conf_timeline)
-            
-            # Calculate segment-level metrics for this file
-            file_metrics = self.evaluate_segments(pred_segments, gt_segments)
-            
-            # Calculate segment-level ROC for this file
-            segment_roc_file = self.calculate_segment_roc_auc_per_class(pred_segments, gt_segments)
-            
-            # Store per-file results
-            per_file_results.append({
-                'pred_file': pred_file,
-                'gt_file': gt_file,
-                'num_pred_segments': len(pred_segments),
-                'num_gt_segments': len(gt_segments),
-                'metrics': file_metrics,
-                'frame_level': frame_roc_file,
-                'segment_level': segment_roc_file
-            })
-            
-            # Add to cumulative collections
-            all_pred_segments.extend(pred_segments)
-            all_gt_segments.extend(gt_segments)
-        
-        # Calculate cumulative metrics
-        print(f"Calculating cumulative metrics across {len(all_pred_segments)} predicted and {len(all_gt_segments)} GT segments...")
-        
-        activity_classes = sorted(list(activity_classes_set))
-        
-        # Calculate cumulative segment-level metrics
-        cumulative_metrics = self.evaluate_segments(all_pred_segments, all_gt_segments)
-        
-        # Check if cumulative_metrics is valid
-        if not cumulative_metrics or 'per_class' not in cumulative_metrics:
-            print("WARNING: Failed to calculate cumulative metrics")
-            cumulative_metrics = {
-                'per_class': {},
-                'macro_avg': {'precision': 0.0, 'recall': 0.0, 'f1_score': 0.0},
-                'micro_avg': {'precision': 0.0, 'recall': 0.0, 'f1_score': 0.0},
-                'weighted_avg': {'precision': 0.0, 'recall': 0.0, 'f1_score': 0.0}
-            }
-        
-        # Calculate cumulative segment-level ROC
-        segment_roc_cumulative = self.calculate_segment_roc_auc_per_class(
-            all_pred_segments,
-            all_gt_segments
-        )
-        
-        # Calculate cumulative frame-level ROC
-        if len(all_file_pred_timelines) > 0:
-            cumulative_pred_timeline = np.concatenate(all_file_pred_timelines)
-            cumulative_gt_timeline = np.concatenate(all_file_gt_timelines)
-            cumulative_conf_timeline = np.concatenate(all_file_confidence_timelines)
-            
-            frame_roc_cumulative = self.calculate_roc_auc_per_class(
-                cumulative_pred_timeline,
-                cumulative_gt_timeline,
-                cumulative_conf_timeline,
-                activity_classes
-            )
-        else:
-            frame_roc_cumulative = {}
-        
-        # Prepare results
-        results = {
-            'metadata': {
-                'num_files': len(predicted_files),
-                'num_pred_segments': len(all_pred_segments),
-                'num_gt_segments': len(all_gt_segments),
-                'activity_classes': activity_classes,
-                'start_time_threshold': self.start_time_threshold
-            },
-            'per_class': cumulative_metrics.get('per_class', {}),
-            'macro_avg': cumulative_metrics.get('macro_avg', {}),
-            'micro_avg': cumulative_metrics.get('micro_avg', {}),
-            'weighted_avg': cumulative_metrics.get('weighted_avg', {}),
-            'frame_level': frame_roc_cumulative,
-            'segment_level': segment_roc_cumulative,
-            'per_file_results': per_file_results
+        results['metadata'] = {
+            'timeline_start': start_time,
+            'timeline_end': end_time,
+            'total_duration_seconds': (end_time - start_time).total_seconds(),
+            'resolution_seconds': self.resolution,
+            'num_pred_segments': len(predicted_segments),
+            'num_gt_segments': len(ground_truth_segments),
+            'activity_classes': all_classes
         }
         
         return results
     
-    def calculate_both_roc_types(self,
-                                pred_segments: List[Dict],
-                                gt_segments: List[Dict],
-                                confidence_scores: List[float],
-                                start_time: datetime,
-                                end_time: datetime) -> Dict:
-        """
-        Calculate both frame-level and segment-level ROC curves
-        
-        Returns:
-            Dictionary with both 'frame_level' and 'segment_level' ROC results
-        """
-        # Create timelines
-        pred_timeline, pred_classes = self.create_timeline(pred_segments, start_time, end_time)
-        gt_timeline, gt_classes = self.create_timeline(gt_segments, start_time, end_time)
-        all_classes = sorted(list(set(pred_classes + gt_classes)))
-        
-        results = {}
-        
-        # 1. Frame-level ROC (existing method)
-        if confidence_scores is not None and len(confidence_scores) > 0:
-            conf_timeline = self.create_confidence_timeline(
-                pred_segments, confidence_scores, start_time, end_time
-            )
-            results['frame_level'] = self.calculate_roc_auc_per_class(
-                pred_timeline, gt_timeline, conf_timeline, all_classes
-            )
-        
-        # 2. Segment-level ROC (new method)
-        if confidence_scores is not None and len(confidence_scores) > 0:
-            results['segment_level'] = self.calculate_segment_based_roc(
-                pred_segments, gt_segments, confidence_scores, all_classes
-            )
-        
-        return results
-    
     def evaluate_with_dual_roc(self,
-                               predicted_file: str,
-                               ground_truth_file: str) -> Dict:
+                                predicted_file: str,
+                                ground_truth_file: str,
+                                aggregation='average') -> Dict:
         """
-        Complete evaluation with both frame-level and segment-level ROC
-        
-        Args:
-            predicted_file: Path to predictions (must include confidence scores)
-            ground_truth_file: Path to ground truth
-            
-        Returns:
-            Dictionary with all metrics including both ROC types
+        Evaluate with both TRUE frame-level and segment-level ROC curves
         """
         # Parse files
         pred_df = self.parse_log_file(predicted_file)
@@ -998,56 +776,69 @@ class SegmentEvaluator:
         pred_segments = self.extract_segments(pred_df)
         gt_segments = self.extract_segments(gt_df)
         
-        if len(pred_segments) == 0 or len(gt_segments) == 0:
-            print("Warning: No segments found")
-            return {}
-        
-        # Extract confidence scores from pred_df if available
-        confidence_scores = []
-        if 'confidence' in pred_df.columns:
-            # Group by segments and average confidence
-            for seg in pred_segments:
-                mask = (pred_df['timestamp'] >= seg['start_time']) & \
-                       (pred_df['timestamp'] <= seg['end_time']) & \
-                       (pred_df['annotation'] == seg['segment_id'])
-                seg_confidences = pred_df[mask]['confidence'].values
-                if len(seg_confidences) > 0:
-                    confidence_scores.append(np.mean(seg_confidences))
-                else:
-                    confidence_scores.append(1.0)
-        
-        # Determine timeline bounds
+        # Get timeline bounds
         all_times = []
         for seg in pred_segments + gt_segments:
             all_times.extend([seg['start_time'], seg['end_time']])
+        
+        if not all_times:
+            return {}
+        
         start_time = min(all_times)
         end_time = max(all_times)
         
-        # Create timelines
-        pred_timeline, pred_classes = self.create_timeline(pred_segments, start_time, end_time)
-        gt_timeline, gt_classes = self.create_timeline(gt_segments, start_time, end_time)
-        all_classes = sorted(list(set(pred_classes + gt_classes)))
+        # Get activity classes
+        activity_classes = sorted(list(set(
+            [s['segment_id'] for s in pred_segments + gt_segments]
+        )))
         
-        # Calculate time-continuous metrics
-        results = self.calculate_time_continuous_metrics(pred_timeline, gt_timeline, all_classes)
+        # Create ground truth timeline
+        gt_timeline, _ = self.create_timeline(gt_segments, start_time, end_time)
         
-        # Calculate both types of ROC
-        if len(confidence_scores) > 0:
-            roc_results = self.calculate_both_roc_types(
-                pred_segments, gt_segments, confidence_scores,
-                start_time, end_time
-            )
-            results.update(roc_results)
+        # Calculate standard segment-based metrics
+        metrics = self.evaluate_segments(pred_segments, gt_segments)
         
-        # Add metadata
-        results['metadata'] = {
-            'timeline_start': start_time,
-            'timeline_end': end_time,
-            'total_duration_seconds': (end_time - start_time).total_seconds(),
-            'resolution_seconds': self.resolution,
-            'num_pred_segments': len(pred_segments),
-            'num_gt_segments': len(gt_segments),
-            'activity_classes': all_classes
+        # Calculate TRUE frame-level ROC
+        frame_roc = self.calculate_roc_auc_per_class(
+            pred_df,
+            gt_timeline,
+            start_time,
+            end_time,
+            activity_classes,
+            aggregation=aggregation
+        )
+        
+        # Validate it's truly frame-level
+        pred_timeline, pred_confidence_timeline = self.create_true_frame_level_timeline_from_events(
+            pred_df, start_time, end_time, aggregation=aggregation
+        )
+        
+        is_true_frame_level = self.validate_frame_level_roc(
+            pred_timeline, pred_confidence_timeline, verbose=True
+        )
+        
+        # Calculate segment-level ROC
+        segment_roc = self.calculate_segment_roc_auc_per_class(pred_segments, gt_segments)
+        
+        # Combine results
+        results = {
+            'per_class': metrics.get('per_class', {}),
+            'macro_avg': metrics.get('macro_avg', {}),
+            'micro_avg': metrics.get('micro_avg', {}),
+            'weighted_avg': metrics.get('weighted_avg', {}),
+            'frame_level': frame_roc,
+            'segment_level': segment_roc,
+            'metadata': {
+                'timeline_start': start_time,
+                'timeline_end': end_time,
+                'total_duration_seconds': (end_time - start_time).total_seconds(),
+                'resolution_seconds': self.resolution,
+                'num_pred_segments': len(pred_segments),
+                'num_gt_segments': len(gt_segments),
+                'activity_classes': activity_classes,
+                'aggregation_method': aggregation,
+                'is_true_frame_level': is_true_frame_level
+            }
         }
         
         return results
@@ -1055,22 +846,12 @@ class SegmentEvaluator:
     def plot_dual_roc_curves(self, results: Dict, save_path: str = 'roc_comparison.png', activity_filter=None):
         """
         Plot both frame-level and segment-level ROC curves side by side
-        
-        Args:
-            results: Results dictionary from evaluate_with_dual_roc()
-            save_path: Path to save the figure
-            activity_filter: List of activity IDs to plot (e.g., ['1', '2', '3', ..., '8'])
         """
         import matplotlib.pyplot as plt
-        from itertools import cycle
         
         if 'frame_level' not in results or 'segment_level' not in results:
             print("Both ROC types not available in results")
             return
-        
-        colors = cycle(["tab:blue", "tab:green", "tab:red", "tab:orange", 
-                    "tab:purple", "tab:brown", "tab:pink", "tab:gray", 
-                    "tab:olive", "tab:cyan"])
         
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
         
@@ -1119,394 +900,12 @@ class SegmentEvaluator:
         
         plt.tight_layout()
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        #plt.show()
+        plt.close()
         
         print(f"\nROC curves saved to: {save_path}")
     
-    def print_per_file_summary(self, results: Dict):
-        """Print summary of per-file results"""
-        if 'per_file_results' not in results:
-            print("No per-file results available")
-            return
-        
-        print("\n" + "=" * 70)
-        print("PER-FILE SUMMARY")
-        print("=" * 70)
-        
-        for idx, file_result in enumerate(results['per_file_results']):
-            print(f"\n--- File {idx + 1}: {file_result['pred_file']} ---")
-            print(f"Ground Truth: {file_result['gt_file']}")
-            print(f"Pred Segments: {file_result['num_pred_segments']}, GT Segments: {file_result['num_gt_segments']}")
-            
-            # Print AUC scores
-            print("\nFrame-Level AUC:")
-            for activity_id in sorted(file_result['frame_level'].keys()):
-                auc_val = file_result['frame_level'][activity_id].get('auc')
-                if auc_val is not None:
-                    print(f"  Activity {activity_id}: {auc_val:.3f}")
-            
-            print("\nSegment-Level AUC:")
-            for activity_id in sorted(file_result['segment_level'].keys()):
-                auc_val = file_result['segment_level'][activity_id].get('auc')
-                if auc_val is not None:
-                    print(f"  Activity {activity_id}: {auc_val:.3f}")
-            
-            # Print key metrics
-            if 'micro_avg' in file_result['metrics']:
-                micro = file_result['metrics']['micro_avg']
-                print(f"\nMicro-Avg: P={micro['precision']:.3f}, R={micro['recall']:.3f}, F1={micro['f1_score']:.3f}")
-    
-    def plot_per_file_roc_comparison(self, results: Dict, activity_id: str, save_path: str = None):
-        """
-        Plot ROC curves for a specific activity across all files
-        
-        Args:
-            results: Results from evaluate_multiple_files()
-            activity_id: Which activity to plot
-            save_path: Optional path to save figure
-        """
-        import matplotlib.pyplot as plt
-        from itertools import cycle
-        
-        if 'per_file_results' not in results:
-            print("No per-file results available")
-            return
-        
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
-        colors = cycle(["tab:blue", "tab:green", "tab:red", "tab:orange", "tab:purple", 
-                       "tab:brown", "tab:pink", "tab:gray", "tab:olive", "tab:cyan"])
-        
-        # Left: Frame-level per file
-        for idx, (file_result, color) in enumerate(zip(results['per_file_results'], colors)):
-            if activity_id in file_result['frame_level'] and file_result['frame_level'][activity_id]['auc'] is not None:
-                fpr = file_result['frame_level'][activity_id]['fpr']
-                tpr = file_result['frame_level'][activity_id]['tpr']
-                auc_val = file_result['frame_level'][activity_id]['auc']
-                ax1.plot(fpr, tpr, color=color, lw=1, alpha=0.5,
-                        label=f"File {idx+1} (AUC={auc_val:.2f})")
-        
-        # Add cumulative
-        if activity_id in results['frame_level'] and results['frame_level'][activity_id]['auc'] is not None:
-            fpr = results['frame_level'][activity_id]['fpr']
-            tpr = results['frame_level'][activity_id]['tpr']
-            auc_val = results['frame_level'][activity_id]['auc']
-            ax1.plot(fpr, tpr, 'k-', lw=3, label=f"Cumulative (AUC={auc_val:.2f})")
-        
-        ax1.plot([0, 1], [0, 1], 'gray', linestyle='--', alpha=0.5)
-        ax1.set_xlabel('False Positive Rate')
-        ax1.set_ylabel('True Positive Rate')
-        ax1.set_title(f'Frame-Level ROC - Activity {activity_id}')
-        ax1.legend(loc='best', fontsize=7)
-        ax1.grid(True, alpha=0.3)
-        
-        # Right: Segment-level per file
-        colors = cycle(["tab:blue", "tab:green", "tab:red", "tab:orange", "tab:purple", 
-                       "tab:brown", "tab:pink", "tab:gray", "tab:olive", "tab:cyan"])
-        for idx, (file_result, color) in enumerate(zip(results['per_file_results'], colors)):
-            if activity_id in file_result['segment_level'] and file_result['segment_level'][activity_id]['auc'] is not None:
-                fpr = file_result['segment_level'][activity_id]['fpr']
-                tpr = file_result['segment_level'][activity_id]['tpr']
-                auc_val = file_result['segment_level'][activity_id]['auc']
-                ax2.plot(fpr, tpr, color=color, lw=1, alpha=0.5,
-                        label=f"File {idx+1} (AUC={auc_val:.2f})")
-        
-        # Add cumulative
-        if activity_id in results['segment_level'] and results['segment_level'][activity_id]['auc'] is not None:
-            fpr = results['segment_level'][activity_id]['fpr']
-            tpr = results['segment_level'][activity_id]['tpr']
-            auc_val = results['segment_level'][activity_id]['auc']
-            ax2.plot(fpr, tpr, 'k-', lw=3, label=f"Cumulative (AUC={auc_val:.2f})")
-        
-        ax2.plot([0, 1], [0, 1], 'gray', linestyle='--', alpha=0.5)
-        ax2.set_xlabel('False Positive Rate')
-        ax2.set_ylabel('True Positive Rate')
-        ax2.set_title(f'Segment-Level ROC - Activity {activity_id}')
-        ax2.legend(loc='best', fontsize=7)
-        ax2.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        plt.step(fpr, tpr, where='post')
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        plt.show()
-        
-        if save_path:
-            print(f"\nPer-file ROC curves saved to: {save_path}")
-            
-    def generate_aggregated_roc_curves(self, all_fold_results, output_dir, activity_filter):
-        """
-        Generate ROC curves aggregated across all folds
-        
-        Two approaches:
-        1. Pool all predictions from all folds (micro-averaging)
-        2. Average ROC curves from each fold (macro-averaging)
-        """
-        import matplotlib.pyplot as plt
-        from itertools import cycle
-        from sklearn.metrics import auc
-        
-        print(f"\nAggregating ROC data from {len(all_fold_results)} folds...")
-        
-        # Filter activities
-        if not activity_filter:
-            activity_filter = all_fold_results[0]['metadata']['activity_classes']
-        
-        # ========================================
-        # Method 1: Pooled ROC (Pool all data points from all folds)
-        # ========================================
-        # This is the most common approach for cross-validation
-        
-        pooled_frame_roc = {}
-        pooled_segment_roc = {}
-        
-        for activity_id in activity_filter:
-            # Collect all FPR/TPR points from all folds
-            all_frame_fpr = []
-            all_frame_tpr = []
-            all_segment_fpr = []
-            all_segment_tpr = []
-            
-            for fold_result in all_fold_results:
-                # Frame-level
-                if 'frame_level' in fold_result and activity_id in fold_result['frame_level']:
-                    frame_data = fold_result['frame_level'][activity_id]
-                    if frame_data.get('auc') is not None:
-                        all_frame_fpr.extend(frame_data['fpr'])
-                        all_frame_tpr.extend(frame_data['tpr'])
-                
-                # Segment-level
-                if 'segment_level' in fold_result and activity_id in fold_result['segment_level']:
-                    seg_data = fold_result['segment_level'][activity_id]
-                    if seg_data.get('auc') is not None:
-                        all_segment_fpr.extend(seg_data['fpr'])
-                        all_segment_tpr.extend(seg_data['tpr'])
-            
-            # Compute pooled ROC by sorting and calculating AUC
-            if len(all_frame_fpr) > 1:
-                # Sort by FPR
-                sorted_pairs = sorted(zip(all_frame_fpr, all_frame_tpr))
-                fpr = np.array([p[0] for p in sorted_pairs])
-                tpr = np.array([p[1] for p in sorted_pairs])
-                
-                try:
-                    pooled_auc = auc(fpr, tpr)
-                    pooled_frame_roc[activity_id] = {
-                        'fpr': fpr,
-                        'tpr': tpr,
-                        'auc': pooled_auc
-                    }
-                except:
-                    pass
-            
-            if len(all_segment_fpr) > 1:
-                sorted_pairs = sorted(zip(all_segment_fpr, all_segment_tpr))
-                fpr = np.array([p[0] for p in sorted_pairs])
-                tpr = np.array([p[1] for p in sorted_pairs])
-                
-                try:
-                    pooled_auc = auc(fpr, tpr)
-                    pooled_segment_roc[activity_id] = {
-                        'fpr': fpr,
-                        'tpr': tpr,
-                        'auc': pooled_auc
-                    }
-                except:
-                    pass
-        
-        # ========================================
-        # Plot Aggregated ROC
-        # ========================================
-        
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
-        colors = cycle(["tab:blue", "tab:green", "tab:red", "tab:orange", 
-                        "tab:purple", "tab:brown", "tab:pink", "tab:gray"])
-        
-        # Left: Frame-level ROC (pooled)
-        for activity_id, color in zip(activity_filter, colors):
-            if activity_id in pooled_frame_roc:
-                fpr = pooled_frame_roc[activity_id]['fpr']
-                tpr = pooled_frame_roc[activity_id]['tpr']
-                roc_auc = pooled_frame_roc[activity_id]['auc']
-                ax1.plot(fpr, tpr, color=color, lw=2, 
-                        label=f"Activity {activity_id} (AUC={roc_auc:.2f})")
-        
-        ax1.plot([0, 1], [0, 1], 'gray', linestyle='--', alpha=0.5)
-        ax1.set_xlabel('False Positive Rate')
-        ax1.set_ylabel('True Positive Rate')
-        ax1.set_title(f'Frame-Level ROC (Pooled Across {len(all_fold_results)} Folds)')
-        ax1.legend(loc='best', fontsize=8)
-        ax1.grid(True, alpha=0.3)
-        
-        # Right: Segment-level ROC (pooled)
-        colors = cycle(["tab:blue", "tab:green", "tab:red", "tab:orange", 
-                        "tab:purple", "tab:brown", "tab:pink", "tab:gray"])
-        for activity_id, color in zip(activity_filter, colors):
-            if activity_id in pooled_segment_roc:
-                fpr = pooled_segment_roc[activity_id]['fpr']
-                tpr = pooled_segment_roc[activity_id]['tpr']
-                roc_auc = pooled_segment_roc[activity_id]['auc']
-                ax2.plot(fpr, tpr, color=color, lw=2,
-                        label=f"Activity {activity_id} (AUC={roc_auc:.2f})")
-        
-        ax2.plot([0, 1], [0, 1], 'gray', linestyle='--', alpha=0.5)
-        ax2.set_xlabel('False Positive Rate')
-        ax2.set_ylabel('True Positive Rate')
-        ax2.set_title(f'Segment-Level ROC (Pooled Across {len(all_fold_results)} Folds)')
-        ax2.legend(loc='best', fontsize=8)
-        ax2.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        
-        # Save
-        save_path = os.path.join(output_dir, 'roc_all_folds_aggregated.png')
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        print(f"[OK] Aggregated ROC curves saved: {save_path}")
-        
-        # Also print aggregated AUC summary
-        print(f"\n{'='*70}")
-        print("AGGREGATED AUC ACROSS ALL FOLDS")
-        print(f"{'='*70}")
-        
-        print("\nFrame-Level AUC:")
-        for activity_id in activity_filter:
-            if activity_id in pooled_frame_roc:
-                auc_val = pooled_frame_roc[activity_id]['auc']
-                print(f"  Activity {activity_id}: {auc_val:.4f}")
-        
-        print("\nSegment-Level AUC:")
-        for activity_id in activity_filter:
-            if activity_id in pooled_segment_roc:
-                auc_val = pooled_segment_roc[activity_id]['auc']
-                print(f"  Activity {activity_id}: {auc_val:.4f}")
-        
-        print(f"{'='*70}\n")
-    
-    def evaluate(self,
-                predicted_file: str,
-                ground_truth_file: str,
-                confidence_scores: List[float] = None) -> Dict:
-        """
-        Complete time-continuous evaluation comparing predicted vs ground truth
-        
-        Args:
-            predicted_file: Path to predicted segments log
-            ground_truth_file: Path to ground truth log
-            confidence_scores: Optional confidence scores for each predicted segment
-            
-        Returns:
-            Dictionary with all evaluation metrics
-        """
-        
-        # Parse files
-        pred_df = self.parse_log_file(predicted_file)
-        gt_df = self.parse_log_file(ground_truth_file)
-        
-        # Extract segments
-        pred_segments = self.extract_segments(pred_df)
-        gt_segments = self.extract_segments(gt_df)
-        
-        if len(pred_segments) == 0 or len(gt_segments) == 0:
-            print("Warning: No segments found in one or both files")
-            return {}
-        
-        # Determine timeline bounds
-        all_times = []
-        for seg in pred_segments + gt_segments:
-            all_times.extend([seg['start_time'], seg['end_time']])
-        
-        start_time = min(all_times)
-        end_time = max(all_times)
-        
-        # Create timelines
-        pred_timeline, pred_classes = self.create_timeline(pred_segments, start_time, end_time)
-        gt_timeline, gt_classes = self.create_timeline(gt_segments, start_time, end_time)
-        
-        # Get all unique activity classes
-        all_classes = sorted(list(set(pred_classes + gt_classes)))
-        
-        # Calculate time-continuous metrics
-        results = self.calculate_time_continuous_metrics(pred_timeline, gt_timeline, all_classes)
-        
-        # Calculate ROC/AUC if confidence scores provided
-        if confidence_scores is not None and len(confidence_scores) > 0:
-            conf_timeline = self.create_confidence_timeline(pred_segments, confidence_scores, start_time, end_time)
-            roc_auc_results = self.calculate_roc_auc_per_class(pred_timeline, gt_timeline, conf_timeline, all_classes)
-            results['roc_auc'] = roc_auc_results
-        
-        # Add metadata
-        results['metadata'] = {
-            'timeline_start': start_time,
-            'timeline_end': end_time,
-            'total_duration_seconds': (end_time - start_time).total_seconds(),
-            'resolution_seconds': self.resolution,
-            'num_pred_segments': len(pred_segments),
-            'num_gt_segments': len(gt_segments),
-            'activity_classes': all_classes
-        }
-        
-        return results
-    
-    def evaluate_segments(self,
-                         predicted_segments: List[Dict],
-                         ground_truth_segments: List[Dict],
-                         confidence_scores: List[float] = None) -> Dict:
-        """
-        Evaluate segments directly without reading files
-        
-        Args:
-            predicted_segments: List of dicts with 'start_time', 'end_time', 'segment_id'
-            ground_truth_segments: Same format
-            confidence_scores: Optional confidence for each predicted segment
-        """
-        if len(predicted_segments) == 0 or len(ground_truth_segments) == 0:
-            print("Warning: No segments provided")
-            return {}
-        
-        # Determine timeline bounds
-        all_times = []
-        for seg in predicted_segments + ground_truth_segments:
-            all_times.extend([seg['start_time'], seg['end_time']])
-        
-        start_time = min(all_times)
-        end_time = max(all_times)
-        
-        # Create timelines
-        pred_timeline, pred_classes = self.create_timeline(predicted_segments, start_time, end_time)
-        gt_timeline, gt_classes = self.create_timeline(ground_truth_segments, start_time, end_time)
-        
-        all_classes = sorted(list(set(pred_classes + gt_classes)))
-        
-        # Calculate metrics
-        results = self.calculate_time_continuous_metrics(pred_timeline, gt_timeline, all_classes)
-        
-        # Calculate ROC/AUC if confidence scores provided
-        if confidence_scores is not None and len(confidence_scores) > 0:
-            conf_timeline = self.create_confidence_timeline(predicted_segments, confidence_scores, start_time, end_time)
-            roc_auc_results = self.calculate_roc_auc_per_class(pred_timeline, gt_timeline, conf_timeline, all_classes)
-            results['roc_auc'] = roc_auc_results
-        
-        results['metadata'] = {
-            'timeline_start': start_time,
-            'timeline_end': end_time,
-            'total_duration_seconds': (end_time - start_time).total_seconds(),
-            'resolution_seconds': self.resolution,
-            'num_pred_segments': len(predicted_segments),
-            'num_gt_segments': len(ground_truth_segments),
-            'activity_classes': all_classes
-        }
-        
-        return results
-    
     def print_report(self, results: Dict, activity_filter=None):
-        """Print a formatted evaluation report
-        
-        Args:
-            results: Results dictionary from evaluation
-            activity_filter: List of activity IDs to include (e.g., ['1', '2', '3', ..., '8'])
-                            If None, all activities are included
-        """
+        """Print a formatted evaluation report"""
         if not results:
             print("No results to display")
             return
@@ -1518,18 +917,14 @@ class SegmentEvaluator:
         if 'metadata' in results:
             meta = results['metadata']
             
-            # Handle both single-file and multi-file metadata
             if 'total_duration_seconds' in meta:
-                # Single-file metadata
                 print(f"\nTimeline Duration: {meta['total_duration_seconds']:.0f} seconds")
                 print(f"Resolution: {meta['resolution_seconds']}s")
             elif 'num_files' in meta:
-                # Multi-file metadata
                 print(f"\nNumber of files: {meta['num_files']}")
                 print(f"Total predicted segments: {meta['num_pred_segments']}")
                 print(f"Total ground truth segments: {meta['num_gt_segments']}")
             
-            # Filter activity classes if specified
             activity_classes = meta.get('activity_classes', [])
             if activity_filter:
                 activity_classes = [a for a in activity_classes if a in activity_filter]
@@ -1541,7 +936,7 @@ class SegmentEvaluator:
         print("=" * 70)
         
         if 'macro_avg' in results:
-            print("\n--- Macro-Average (simple average across classes) ---")
+            print("\n--- Macro-Average (simple average across classes) ---")            
             print(f"Precision: {results['macro_avg']['precision']:.4f}")
             print(f"Recall:    {results['macro_avg']['recall']:.4f}")
             print(f"F1 Score:  {results['macro_avg']['f1_score']:.4f}")
@@ -1561,13 +956,12 @@ class SegmentEvaluator:
             print(f"Recall:    {results['weighted_avg']['recall']:.4f}")
             print(f"F1 Score:  {results['weighted_avg']['f1_score']:.4f}")
         
-        # Per-class metrics - FILTERED
+        # Per-class metrics
         if 'per_class' in results:
             print("\n" + "=" * 70)
             print("PER-CLASS METRICS")
             print("=" * 70)
             
-            # Filter activities
             activities_to_show = sorted(results['per_class'].keys())
             if activity_filter:
                 activities_to_show = [a for a in activities_to_show if a in activity_filter]
@@ -1598,63 +992,357 @@ class SegmentEvaluator:
                         print(f"  Segment-Level AUC:     {auc_val:.4f}")
         
         print("\n" + "=" * 70)
-
-# Example usage
-if __name__ == "__main__":
+        
+    def evaluate_multiple_files(self, 
+                            predicted_files: List[str],
+                            ground_truth_files: List[str],
+                            aggregation='average') -> Dict:
+        """
+        Evaluate predictions across multiple files with TRUE frame-level ROC
+        
+        Args:
+            predicted_files: List of paths to prediction files
+            ground_truth_files: List of paths to ground truth files
+            aggregation: How to aggregate events per frame ('average', 'max', 'median')
+            
+        Returns:
+            Dictionary containing aggregated metrics and per-file results
+        """
+        if len(predicted_files) != len(ground_truth_files):
+            raise ValueError("Number of prediction and ground truth files must match")
+        
+        print(f"\nEvaluating {len(predicted_files)} files...")
+        
+        # Storage for aggregated data
+        all_pred_segments = []
+        all_gt_segments = []
+        per_file_results = []
+        
+        # Store per-file data for cumulative ROC calculation
+        all_file_pred_dfs = []
+        all_file_gt_timelines = []
+        all_file_start_times = []
+        all_file_end_times = []
+        
+        # Get activity classes from all files
+        activity_classes_set = set()
+        
+        # Process each file
+        for file_idx, (pred_file, gt_file) in enumerate(zip(predicted_files, ground_truth_files)):
+            # Parse files
+            pred_df = self.parse_log_file(pred_file)
+            gt_df = self.parse_log_file(gt_file)
+            
+            # Extract segments
+            pred_segments = self.extract_segments(pred_df)
+            gt_segments = self.extract_segments(gt_df)
+            
+            # Collect activity classes
+            for seg in pred_segments + gt_segments:
+                activity_classes_set.add(seg['segment_id'])
+            
+            # Skip if no segments
+            if len(pred_segments) == 0 and len(gt_segments) == 0:
+                continue
+            
+            # Get timeline bounds for THIS file
+            all_times = []
+            for seg in pred_segments + gt_segments:
+                all_times.extend([seg['start_time'], seg['end_time']])
+            
+            if not all_times:
+                continue
+            
+            file_start_time = min(all_times)
+            file_end_time = max(all_times)
+            
+            # Get activity classes for this specific file
+            file_classes = sorted(list(set([s['segment_id'] for s in pred_segments + gt_segments])))
+            
+            # Create ground truth timeline for THIS file
+            file_gt_timeline, _ = self.create_timeline(gt_segments, file_start_time, file_end_time)
+            
+            # Calculate per-file TRUE frame-level ROC
+            frame_roc_file = self.calculate_roc_auc_per_class(
+                pred_df,
+                file_gt_timeline,
+                file_start_time,
+                file_end_time,
+                file_classes,
+                aggregation=aggregation
+            )
+            
+            # Store data for cumulative calculation
+            all_file_pred_dfs.append(pred_df)
+            all_file_gt_timelines.append(file_gt_timeline)
+            all_file_start_times.append(file_start_time)
+            all_file_end_times.append(file_end_time)
+            
+            # Calculate segment-level metrics for this file
+            file_metrics = self.evaluate_segments(pred_segments, gt_segments)
+            
+            # Calculate segment-level ROC for this file
+            segment_roc_file = self.calculate_segment_roc_auc_per_class(pred_segments, gt_segments)
+            
+            # Store per-file results
+            per_file_results.append({
+                'pred_file': pred_file,
+                'gt_file': gt_file,
+                'num_pred_segments': len(pred_segments),
+                'num_gt_segments': len(gt_segments),
+                'metrics': file_metrics,
+                'frame_level': frame_roc_file,
+                'segment_level': segment_roc_file
+            })
+            
+            # Add to cumulative collections
+            all_pred_segments.extend(pred_segments)
+            all_gt_segments.extend(gt_segments)
+        
+        # Calculate cumulative metrics
+        print(f"Calculating cumulative metrics across {len(all_pred_segments)} predicted and {len(all_gt_segments)} GT segments...")
+        
+        activity_classes = sorted(list(activity_classes_set))
+        
+        # Calculate cumulative segment-level metrics
+        cumulative_metrics = self.evaluate_segments(all_pred_segments, all_gt_segments)
+        
+        # Calculate cumulative segment-level ROC
+        segment_roc_cumulative = self.calculate_segment_roc_auc_per_class(
+            all_pred_segments,
+            all_gt_segments
+        )
+        
+        # Calculate cumulative TRUE frame-level ROC
+        if len(all_file_gt_timelines) > 0:
+            cumulative_gt_timeline = np.concatenate(all_file_gt_timelines)
+            
+            # For frame-level, we need to handle each file's events separately
+            # then concatenate the resulting confidence timelines
+            frame_level_timelines = []
+            
+            for pred_df, start_time, end_time in zip(all_file_pred_dfs, 
+                                                    all_file_start_times,
+                                                    all_file_end_times):
+                _, conf_timeline = self.create_true_frame_level_timeline_from_events(
+                    pred_df, start_time, end_time, aggregation=aggregation
+                )
+                frame_level_timelines.append(conf_timeline)
+            
+            # Now calculate ROC on concatenated data
+            frame_roc_cumulative = {}
+            cumulative_pred_timeline = []
+            
+            for pred_df, start_time, end_time in zip(all_file_pred_dfs,
+                                                    all_file_start_times,
+                                                    all_file_end_times):
+                pred_timeline, _ = self.create_true_frame_level_timeline_from_events(
+                    pred_df, start_time, end_time, aggregation=aggregation
+                )
+                cumulative_pred_timeline.append(pred_timeline)
+            
+            cumulative_pred_timeline = np.concatenate(cumulative_pred_timeline)
+            cumulative_conf_timeline = np.concatenate(frame_level_timelines)
+            
+            # Calculate ROC for each activity
+            for activity_id in activity_classes:
+                y_true = (cumulative_gt_timeline == activity_id).astype(int)
+                y_scores = np.zeros(len(cumulative_conf_timeline))
+                
+                for i in range(len(cumulative_pred_timeline)):
+                    if cumulative_pred_timeline[i] == activity_id:
+                        y_scores[i] = cumulative_conf_timeline[i]
+                
+                if len(np.unique(y_true)) > 1 and len(np.unique(y_scores)) > 1:
+                    try:
+                        fpr, tpr, thresholds = roc_curve(y_true, y_scores)
+                        roc_auc = auc(fpr, tpr)
+                        frame_roc_cumulative[activity_id] = {
+                            'auc': roc_auc,
+                            'fpr': fpr,
+                            'tpr': tpr,
+                            'thresholds': thresholds
+                        }
+                    except:
+                        frame_roc_cumulative[activity_id] = {'auc': None}
+                else:
+                    frame_roc_cumulative[activity_id] = {'auc': None}
+            
+            # Validate cumulative frame-level
+            print("\nCumulative Frame-Level ROC Validation:")
+            is_true_frame_level = self.validate_frame_level_roc(
+                cumulative_pred_timeline, cumulative_conf_timeline, verbose=True
+            )
+        else:
+            frame_roc_cumulative = {}
+            is_true_frame_level = False
+        
+        # Prepare results
+        results = {
+            'metadata': {
+                'num_files': len(predicted_files),
+                'num_pred_segments': len(all_pred_segments),
+                'num_gt_segments': len(all_gt_segments),
+                'activity_classes': activity_classes,
+                'start_time_threshold': self.start_time_threshold,
+                'aggregation_method': aggregation,
+                'is_true_frame_level': is_true_frame_level
+            },
+            'per_class': cumulative_metrics.get('per_class', {}),
+            'macro_avg': cumulative_metrics.get('macro_avg', {}),
+            'micro_avg': cumulative_metrics.get('micro_avg', {}),
+            'weighted_avg': cumulative_metrics.get('weighted_avg', {}),
+            'frame_level': frame_roc_cumulative,
+            'segment_level': segment_roc_cumulative,
+            'per_file_results': per_file_results
+        }
+        
+        return results
     
-    # Initialize evaluator
-    evaluator = SegmentEvaluator(timeline_resolution_seconds=1.0, start_time_threshold_seconds=0)
-    
-    # Example 1: Basic evaluation (backward compatible)
-    print("=" * 70)
-    print("EXAMPLE 1: BASIC EVALUATION")
-    print("=" * 70)
-    results = evaluator.evaluate(
-        predicted_file='predicted.txt',
-        ground_truth_file='ground_truth.txt'
-    )
-    evaluator.print_report(results)
-    
-    print("\n\n")
-    
-    # Example 2: Evaluation with dual ROC curves (new feature)
-    print("=" * 70)
-    print("EXAMPLE 2: EVALUATION WITH DUAL ROC CURVES - SINGLE FILE")
-    print("=" * 70)
-    
-    results_with_roc = evaluator.evaluate_with_dual_roc(
-        predicted_file='predicted_92_P080.txt',
-        ground_truth_file='P080.txt'
-    )
-    
-    evaluator.print_report(results_with_roc)
-    
-    # Plot both types of ROC curves
-    evaluator.plot_dual_roc_curves(results_with_roc, save_path='dual_roc_curves.png')
-    
-    print("\n\n")
-    
-    # Example 3: Evaluation across multiple files (PROPER WAY FOR 100 FILES)
-    print("=" * 70)
-    print("EXAMPLE 3: MULTI-FILE EVALUATION (100+ FILES)")
-    print("=" * 70)
-    
-    # Your file lists
-    pred_files = ['predicted_92_P080.txt', 'predicted_92_P081.txt']  # ... add all 100 files
-    gt_files = ['P080.txt', 'P081.txt']  # ... add all 100 files
-    
-    results_multi = evaluator.evaluate_multiple_files(pred_files, gt_files)
-    
-    # Print cumulative report
-    print("\n--- CUMULATIVE RESULTS ---")
-    evaluator.print_report(results_multi)
-    
-    # Print per-file summary
-    evaluator.print_per_file_summary(results_multi)
-    
-    # Plot cumulative ROC curves
-    evaluator.plot_dual_roc_curves(results_multi, save_path='cumulative_roc.png')
-    
-    # Plot per-file comparison for a specific activity
-    evaluator.plot_per_file_roc_comparison(results_multi, activity_id='1', 
-                                           save_path='per_file_activity_1_roc.png')
+    def generate_aggregated_roc_curves_vertical_avg(self, all_fold_results, output_dir, activity_filter):
+        """
+        Generate ROC curves using vertical averaging (macro-averaging)
+        
+        Interpolates all fold ROC curves to common FPR points and averages TPR.
+        This is the most common approach in cross-validation.
+        """
+        import matplotlib.pyplot as plt
+        
+        print(f"\nAggregating ROC data from {len(all_fold_results)} folds using vertical averaging...")
+        
+        if not activity_filter:
+            activity_filter = all_fold_results[0]['metadata']['activity_classes']
+        
+        # Common FPR points for interpolation
+        mean_fpr = np.linspace(0, 1, 100)
+        
+        averaged_frame_roc = {}
+        averaged_segment_roc = {}
+        
+        for activity_id in activity_filter:
+            # Collect TPR curves for each fold (interpolated to common FPR)
+            frame_tprs = []
+            frame_aucs = []
+            segment_tprs = []
+            segment_aucs = []
+            
+            for fold_result in all_fold_results:
+                # Frame-level
+                if 'frame_level' in fold_result and activity_id in fold_result['frame_level']:
+                    frame_data = fold_result['frame_level'][activity_id]
+                    if frame_data.get('auc') is not None:
+                        # Interpolate this fold's TPR to common FPR points
+                        interp_tpr = np.interp(mean_fpr, frame_data['fpr'], frame_data['tpr'])
+                        frame_tprs.append(interp_tpr)
+                        frame_aucs.append(frame_data['auc'])
+                
+                # Segment-level
+                if 'segment_level' in fold_result and activity_id in fold_result['segment_level']:
+                    seg_data = fold_result['segment_level'][activity_id]
+                    if seg_data.get('auc') is not None:
+                        interp_tpr = np.interp(mean_fpr, seg_data['fpr'], seg_data['tpr'])
+                        segment_tprs.append(interp_tpr)
+                        segment_aucs.append(seg_data['auc'])
+            
+            # Average TPR across folds
+            if len(frame_tprs) > 0:
+                mean_tpr = np.mean(frame_tprs, axis=0)
+                mean_tpr[0] = 0.0  # Ensure it starts at (0,0)
+                mean_tpr[-1] = 1.0  # Ensure it ends at (1,1)
+                
+                mean_auc = auc(mean_fpr, mean_tpr)
+                std_auc = np.std(frame_aucs)
+                
+                averaged_frame_roc[activity_id] = {
+                    'fpr': mean_fpr,
+                    'tpr': mean_tpr,
+                    'auc': mean_auc,
+                    'auc_std': std_auc
+                }
+            
+            if len(segment_tprs) > 0:
+                mean_tpr = np.mean(segment_tprs, axis=0)
+                mean_tpr[0] = 0.0
+                mean_tpr[-1] = 1.0
+                
+                mean_auc = auc(mean_fpr, mean_tpr)
+                std_auc = np.std(segment_aucs)
+                
+                averaged_segment_roc[activity_id] = {
+                    'fpr': mean_fpr,
+                    'tpr': mean_tpr,
+                    'auc': mean_auc,
+                    'auc_std': std_auc
+                }
+        
+        # Plot
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+        colors = cycle(["tab:blue", "tab:green", "tab:red", "tab:orange", 
+                        "tab:purple", "tab:brown", "tab:pink", "tab:gray"])
+        
+        # Frame-level
+        for activity_id, color in zip(activity_filter, colors):
+            if activity_id in averaged_frame_roc:
+                fpr = averaged_frame_roc[activity_id]['fpr']
+                tpr = averaged_frame_roc[activity_id]['tpr']
+                mean_auc = averaged_frame_roc[activity_id]['auc']
+                std_auc = averaged_frame_roc[activity_id]['auc_std']
+                
+                ax1.plot(fpr, tpr, color=color, lw=2,
+                        label=f"Activity {activity_id} (AUC={mean_auc:.2f}±{std_auc:.2f})")
+        
+        ax1.plot([0, 1], [0, 1], 'gray', linestyle='--', alpha=0.5)
+        ax1.set_xlabel('False Positive Rate')
+        ax1.set_ylabel('True Positive Rate')
+        ax1.set_title(f'Frame-Level ROC (Averaged Across {len(all_fold_results)} Folds)')
+        ax1.legend(loc='best', fontsize=8)
+        ax1.grid(True, alpha=0.3)
+        
+        # Segment-level
+        colors = cycle(["tab:blue", "tab:green", "tab:red", "tab:orange", 
+                        "tab:purple", "tab:brown", "tab:pink", "tab:gray"])
+        for activity_id, color in zip(activity_filter, colors):
+            if activity_id in averaged_segment_roc:
+                fpr = averaged_segment_roc[activity_id]['fpr']
+                tpr = averaged_segment_roc[activity_id]['tpr']
+                mean_auc = averaged_segment_roc[activity_id]['auc']
+                std_auc = averaged_segment_roc[activity_id]['auc_std']
+                
+                ax2.plot(fpr, tpr, color=color, lw=2,
+                        label=f"Activity {activity_id} (AUC={mean_auc:.2f}±{std_auc:.2f})")
+        
+        ax2.plot([0, 1], [0, 1], 'gray', linestyle='--', alpha=0.5)
+        ax2.set_xlabel('False Positive Rate')
+        ax2.set_ylabel('True Positive Rate')
+        ax2.set_title(f'Segment-Level ROC (Averaged Across {len(all_fold_results)} Folds)')
+        ax2.legend(loc='best', fontsize=8)
+        ax2.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        
+        save_path = os.path.join(output_dir, 'roc_all_folds_averaged.png')
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"[OK] Averaged ROC curves saved: {save_path}")
+        
+        # Print summary
+        print(f"\n{'='*70}")
+        print("AVERAGED AUC ACROSS ALL FOLDS")
+        print(f"{'='*70}")
+        
+        print("\nFrame-Level AUC (Mean ± Std):")
+        for activity_id in activity_filter:
+            if activity_id in averaged_frame_roc:
+                mean_auc = averaged_frame_roc[activity_id]['auc']
+                std_auc = averaged_frame_roc[activity_id]['auc_std']
+                print(f"  Activity {activity_id}: {mean_auc:.4f} ± {std_auc:.4f}")
+        
+        print("\nSegment-Level AUC (Mean ± Std):")
+        for activity_id in activity_filter:
+            if activity_id in averaged_segment_roc:
+                mean_auc = averaged_segment_roc[activity_id]['auc']
+                std_auc = averaged_segment_roc[activity_id]['auc_std']
+                print(f"  Activity {activity_id}: {mean_auc:.4f} ± {std_auc:.4f}")
+        
+        print(f"{'='*70}\n")

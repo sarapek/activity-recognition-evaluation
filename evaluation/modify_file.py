@@ -3,12 +3,14 @@ import numpy as np
 import os
 from datetime import datetime, timedelta
 from typing import List, Tuple
+import re
 
 class SanityCheckModifier:
     """
     Modifies sensor data in controlled ways to test segment evaluation system.
     Creates various types of errors to validate evaluation metrics.
     Now includes confidence scores for ROC curve testing.
+    Uses segment-based approach for continuous predictions.
     """
     
     def __init__(self, seed=42):
@@ -22,390 +24,476 @@ class SanityCheckModifier:
         with open(filepath, 'r') as f:
             return f.readlines()
     
-    def write_file(self, filepath: str, lines: List[str], add_confidence: bool = True):
+    def _normalize_activity(self, activity: str) -> str:
+        """Extract numeric activity ID from labels like '2-start', '2.1', etc."""
+        match = re.match(r'(\d+)', str(activity))
+        if match:
+            return match.group(1)
+        return str(activity)
+    
+    def _generate_confidence_score(self, line: str, parts: List[str], variant_name: str = 'unknown') -> float:
         """
-        Write lines to file with confidence scores, creating directories if needed
+        Generate confidence scores based on variant type
         
         Args:
-            filepath: Output file path
-            lines: Lines to write
-            add_confidence: If True, adds confidence scores to predictions
+            line: Input line (can be None)
+            parts: Parsed line parts (can be None)
+            variant_name: Name of the variant (e.g., 'perfect', 'label_confusion')
+        
+        Returns:
+            Confidence score between 0 and 1
         """
-        output_dir = os.path.dirname(filepath)
-        if output_dir and not os.path.exists(output_dir):
+        variant_lower = variant_name.lower()
+        
+        if 'perfect' in variant_lower:
+            # Perfect predictions - HIGH confidence
+            return np.random.uniform(0.85, 0.95)
+        
+        elif 'label_confusion' in variant_lower or 'random' in variant_lower:
+            # Wrong labels - LOW confidence
+            return np.random.uniform(0.15, 0.30)
+        
+        elif 'shift' in variant_lower or 'boundary' in variant_lower:
+            # Timing errors - MEDIUM confidence
+            return np.random.uniform(0.50, 0.70)
+        
+        elif 'false_positive' in variant_lower:
+            # False positives - MEDIUM-LOW confidence
+            return np.random.uniform(0.30, 0.50)
+        
+        elif 'missing' in variant_lower:
+            # Missing segments - MEDIUM-HIGH confidence
+            return np.random.uniform(0.65, 0.80)
+        
+        elif 'combined' in variant_lower:
+            # Combined errors - MEDIUM confidence
+            return np.random.uniform(0.40, 0.60)
+        
+        else:
+            # Default
+            return np.random.uniform(0.45, 0.65)
+    
+    def _extract_segments_from_lines(self, lines: List[str]) -> List[dict]:
+        """
+        Extract segments from ground truth lines
+        Groups consecutive events with same activity into segments
+        """
+        segments = []
+        current_segment = None
+        
+        for line in lines:
+            parts = line.strip().split('\t')
+            
+            if len(parts) < 4 or not parts[3].strip():
+                continue
+            
+            timestamp_str = parts[0]
+            sensor = parts[1]
+            activity_raw = parts[3]
+            
+            # CRITICAL: Skip error annotations
+            if 'error' in activity_raw.lower():
+                continue
+            
+            # Parse timestamp
+            try:
+                timestamp = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S.%f')
+            except ValueError:
+                try:
+                    timestamp = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S')
+                except ValueError:
+                    continue
+            
+            # Extract numeric activity
+            activity = self._normalize_activity(activity_raw)
+            
+            # Check if this continues the current segment or starts a new one
+            if current_segment is None or current_segment['activity'] != activity:
+                # Save previous segment
+                if current_segment is not None:
+                    segments.append(current_segment)
+                
+                # Start new segment
+                current_segment = {
+                    'activity': activity,
+                    'start_time': timestamp,
+                    'end_time': timestamp,
+                    'sensor': sensor,
+                    'events': [{'timestamp': timestamp, 'sensor': sensor}]
+                }
+            else:
+                # Extend current segment
+                current_segment['end_time'] = timestamp
+                current_segment['events'].append({'timestamp': timestamp, 'sensor': sensor})
+        
+        # Don't forget last segment
+        if current_segment is not None:
+            segments.append(current_segment)
+        
+        return segments
+    
+    def create_continuous_predictions_from_gt(self, gt_file: str, variant_name: str, 
+                                      resolution_seconds: float = None) -> List[str]:
+        """
+        Generate predictions from ground truth by annotating ALL events between start/end markers
+        Uses existing timestamps from GT file, doesn't create new ones
+        """
+        gt_lines = self.read_file(gt_file)
+        
+        # First pass: identify segment boundaries
+        segment_boundaries = []
+        current_activity = None
+        segment_start = None
+        
+        for line in gt_lines:
+            parts = line.strip().split()
+            
+            if len(parts) < 5:
+                continue
+            
+            timestamp_str = f"{parts[0]} {parts[1]}"
+            activity_raw = parts[4] if len(parts) > 4 else ""
+            
+            # Skip if no activity annotation
+            if not activity_raw or 'error' in activity_raw.lower():
+                continue
+            
+            # Parse timestamp
+            try:
+                timestamp = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S.%f')
+            except ValueError:
+                try:
+                    timestamp = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S')
+                except ValueError:
+                    continue
+            
+            # Check for start/end markers
+            if '-start' in activity_raw.lower():
+                activity_id = self._normalize_activity(activity_raw.split('-start')[0])
+                if current_activity is not None and segment_start is not None:
+                    # Save previous segment
+                    segment_boundaries.append({
+                        'activity': current_activity,
+                        'start': segment_start,
+                        'end': timestamp
+                    })
+                current_activity = activity_id
+                segment_start = timestamp
+            
+            elif '-end' in activity_raw.lower():
+                activity_id = self._normalize_activity(activity_raw.split('-end')[0])
+                if current_activity == activity_id and segment_start is not None:
+                    segment_boundaries.append({
+                        'activity': current_activity,
+                        'start': segment_start,
+                        'end': timestamp
+                    })
+                    current_activity = None
+                    segment_start = None
+        
+        # Second pass: annotate ALL events that fall within segments
+        predictions = []
+        
+        for line in gt_lines:
+            parts = line.strip().split()
+            
+            if len(parts) < 4:
+                continue
+            
+            timestamp_str = f"{parts[0]} {parts[1]}"
+            sensor = parts[2]
+            status = parts[3]
+            
+            # Parse timestamp
+            try:
+                timestamp = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S.%f')
+            except ValueError:
+                try:
+                    timestamp = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S')
+                except ValueError:
+                    continue
+            
+            # Check which segment this event falls into
+            activity = None
+            for seg in segment_boundaries:
+                if seg['start'] <= timestamp <= seg['end']:
+                    activity = seg['activity']
+                    break
+            
+            # Only create prediction if event is within a segment
+            if activity is not None:
+                confidence = self._generate_confidence_score(None, None, variant_name)
+                predictions.append(f"{timestamp_str} {sensor} {sensor} {status} {activity} {confidence:.6f}")
+        
+        return predictions
+    
+    def create_continuous_predictions_with_time_shift(self, gt_file: str, variant_name: str,
+                                                      shift_range: Tuple[float, float],
+                                                      resolution_seconds: float = 1.0) -> List[str]:
+        """Generate predictions with shifted timestamps"""
+        gt_lines = self.read_file(gt_file)
+        segments = self._extract_segments_from_lines(gt_lines)
+        
+        predictions = []
+        
+        for seg in segments:
+            activity = seg['activity']
+            start_time = seg['start_time']
+            end_time = seg['end_time']
+            sensor = seg['sensor']
+            
+            # Apply random shift to this segment
+            shift = random.uniform(shift_range[0], shift_range[1])
+            shifted_start = start_time + timedelta(seconds=shift)
+            shifted_end = end_time + timedelta(seconds=shift)
+            
+            current_time = shifted_start
+            while current_time <= shifted_end:
+                confidence = self._generate_confidence_score(None, None, variant_name)
+                timestamp_str = current_time.strftime('%Y-%m-%d %H:%M:%S.%f')
+                predictions.append(f"{timestamp_str} {sensor} {sensor} ON {activity} {confidence:.6f}")
+                current_time += timedelta(seconds=resolution_seconds)
+        
+        return predictions
+    
+    def create_continuous_predictions_with_boundary_shift(self, gt_file: str, variant_name: str,
+                                                          shift_range: Tuple[float, float],
+                                                          resolution_seconds: float = 1.0) -> List[str]:
+        """Generate predictions with shifted segment boundaries"""
+        gt_lines = self.read_file(gt_file)
+        segments = self._extract_segments_from_lines(gt_lines)
+        
+        predictions = []
+        
+        for seg in segments:
+            activity = seg['activity']
+            start_time = seg['start_time']
+            end_time = seg['end_time']
+            sensor = seg['sensor']
+            
+            # Shift start and end independently
+            start_shift = random.uniform(shift_range[0], shift_range[1])
+            end_shift = random.uniform(shift_range[0], shift_range[1])
+            
+            shifted_start = start_time + timedelta(seconds=start_shift)
+            shifted_end = end_time + timedelta(seconds=end_shift)
+            
+            # Ensure end is after start
+            if shifted_end <= shifted_start:
+                shifted_end = shifted_start + timedelta(seconds=1.0)
+            
+            current_time = shifted_start
+            while current_time <= shifted_end:
+                confidence = self._generate_confidence_score(None, None, variant_name)
+                timestamp_str = current_time.strftime('%Y-%m-%d %H:%M:%S.%f')
+                predictions.append(f"{timestamp_str} {sensor} {sensor} ON {activity} {confidence:.6f}")
+                current_time += timedelta(seconds=resolution_seconds)
+        
+        return predictions
+    
+    def create_continuous_predictions_with_missing_segments(self, gt_file: str, variant_name: str,
+                                                            missing_percent: float = 30,
+                                                            resolution_seconds: float = 1.0) -> List[str]:
+        """Generate predictions but randomly skip entire segments"""
+        gt_lines = self.read_file(gt_file)
+        segments = self._extract_segments_from_lines(gt_lines)
+        
+        # Randomly select segments to keep
+        num_to_keep = int(len(segments) * (1 - missing_percent / 100))
+        kept_segments = random.sample(segments, num_to_keep)
+        
+        predictions = []
+        
+        for seg in kept_segments:
+            activity = seg['activity']
+            start_time = seg['start_time']
+            end_time = seg['end_time']
+            sensor = seg['sensor']
+            
+            current_time = start_time
+            while current_time <= end_time:
+                confidence = self._generate_confidence_score(None, None, variant_name)
+                timestamp_str = current_time.strftime('%Y-%m-%d %H:%M:%S.%f')
+                predictions.append(f"{timestamp_str} {sensor} {sensor} ON {activity} {confidence:.6f}")
+                current_time += timedelta(seconds=resolution_seconds)
+        
+        # Sort by timestamp
+        predictions.sort()
+        
+        return predictions
+    
+    def create_continuous_predictions_with_false_positives(self, gt_file: str, variant_name: str,
+                                                       num_false_segments: int = 10,
+                                                       resolution_seconds: float = 1.0) -> List[str]:
+        """Generate predictions with additional false positive segments"""
+        gt_lines = self.read_file(gt_file)
+        segments = self._extract_segments_from_lines(gt_lines)
+        
+        all_activities = list(set(seg['activity'] for seg in segments))
+        predictions = []
+        
+        # Generate predictions for REAL segments with HIGH confidence (correct predictions)
+        for seg in segments:
+            activity = seg['activity']
+            start_time = seg['start_time']
+            end_time = seg['end_time']
+            sensor = seg['sensor']
+            
+            current_time = start_time
+            while current_time <= end_time:
+                # HIGH confidence for correct predictions
+                confidence = np.random.uniform(0.85, 0.95)  # ← Changed!
+                timestamp_str = current_time.strftime('%Y-%m-%d %H:%M:%S.%f')
+                predictions.append(f"{timestamp_str} {sensor} {sensor} ON {activity} {confidence:.6f}")
+                current_time += timedelta(seconds=resolution_seconds)
+        
+        # Add FALSE positive segments with LOW confidence
+        if len(segments) > 1:
+            for _ in range(num_false_segments):
+                seg_idx = random.randint(0, len(segments) - 2)
+                gap_start = segments[seg_idx]['end_time'] + timedelta(seconds=1)
+                gap_end = segments[seg_idx + 1]['start_time'] - timedelta(seconds=1)
+                
+                if gap_end > gap_start:
+                    false_activity = random.choice(all_activities)
+                    false_sensor = segments[seg_idx]['sensor']
+                    
+                    duration = min((gap_end - gap_start).total_seconds(), 5.0)
+                    false_end = gap_start + timedelta(seconds=duration)
+                    
+                    current_time = gap_start
+                    while current_time <= false_end:
+                        # LOW confidence for false predictions
+                        confidence = np.random.uniform(0.30, 0.50)  # ← Changed!
+                        timestamp_str = current_time.strftime('%Y-%m-%d %H:%M:%S.%f')
+                        predictions.append(f"{timestamp_str} {false_sensor} {false_sensor} ON {false_activity} {confidence:.6f}")
+                        current_time += timedelta(seconds=resolution_seconds)
+        
+        predictions.sort()
+        return predictions
+    
+    def create_continuous_predictions_with_label_swap(self, gt_file: str, variant_name: str,
+                                                  swap_percent: float = 40,
+                                                  resolution_seconds: float = 1.0) -> List[str]:
+        """Generate predictions with swapped activity labels"""
+        gt_lines = self.read_file(gt_file)
+        segments = self._extract_segments_from_lines(gt_lines)
+        
+        all_activities = list(set(seg['activity'] for seg in segments))
+        
+        if len(all_activities) < 2:
+            return self.create_continuous_predictions_from_gt(gt_file, variant_name, resolution_seconds)
+        
+        # Randomly select segments to swap
+        num_to_swap = int(len(segments) * (swap_percent / 100))
+        segments_to_swap = random.sample(range(len(segments)), num_to_swap)
+        
+        predictions = []
+        
+        for idx, seg in enumerate(segments):
+            # Determine if this segment is swapped
+            is_swapped = idx in segments_to_swap
+            
+            if is_swapped:
+                # Swap activity
+                other_activities = [a for a in all_activities if a != seg['activity']]
+                activity = random.choice(other_activities)
+                # LOW confidence for incorrect predictions
+                confidence_range = (0.15, 0.30)  # ← Changed!
+            else:
+                activity = seg['activity']
+                # HIGH confidence for correct predictions
+                confidence_range = (0.85, 0.95)  # ← Changed!
+            
+            start_time = seg['start_time']
+            end_time = seg['end_time']
+            sensor = seg['sensor']
+            
+            current_time = start_time
+            while current_time <= end_time:
+                confidence = np.random.uniform(*confidence_range)
+                timestamp_str = current_time.strftime('%Y-%m-%d %H:%M:%S.%f')
+                predictions.append(f"{timestamp_str} {sensor} {sensor} ON {activity} {confidence:.6f}")
+                current_time += timedelta(seconds=resolution_seconds)
+        
+        return predictions
+    
+    def create_sanity_check_variants(self, input_file: str, output_dir: str):
+        """
+        Create sanity check variants with continuous predictions
+        Each variant tests different types of errors
+        """
+        if not os.path.exists(output_dir):
             os.makedirs(output_dir)
         
-        with open(filepath, 'w') as f:
-            for line in lines:
-                if add_confidence:
-                    # Parse the line
-                    parts = line.strip().split('\t')
-                    
-                    # Check if this line has an activity annotation
-                    has_activity = len(parts) >= 4 and parts[3].strip()
-                    
-                    if has_activity:
-                        # Generate confidence score based on the type of modification
-                        confidence = self._generate_confidence_score(line, parts)
-                        
-                        # Format: date time sensor sensor status activity confidence
-                        # Need to duplicate sensor name for prediction format
-                        timestamp = parts[0]
-                        sensor = parts[1]
-                        status = parts[2]
-                        activity = parts[3]
-                        
-                        f.write(f"{timestamp}\t{sensor}\t{sensor}\t{status}\t{activity}\t{confidence:.6f}\n")
-                    else:
-                        # No activity annotation, write as-is
-                        f.write(line)
-                else:
-                    f.write(line)
-    
-    def _generate_confidence_score(self, line: str, parts: List[str]) -> float:
-        """
-        Generate realistic confidence scores based on the quality of prediction
-        
-        Higher confidence for:
-        - Perfect matches
-        - Correct labels
-        - Good timing
-        
-        Lower confidence for:
-        - Modified/shifted predictions
-        - Label swaps
-        - False positives
-        """
-        # Check modification log to see if this line was modified
-        line_modified = False
-        modification_type = None
-        
-        for mod in self.modifications_log:
-            if 'line' in mod:
-                # Note: This is approximate since we don't track exact line numbers
-                # But it gives us variation in confidence scores
-                modification_type = mod.get('type')
-                line_modified = True
-                break
-        
-        # Base confidence
-        if not line_modified:
-            # Perfect match - high confidence
-            confidence = np.random.uniform(0.85, 0.95)
-        elif modification_type == 'timestamp_shift':
-            # Timing error - medium-high confidence
-            confidence = np.random.uniform(0.65, 0.85)
-        elif modification_type == 'boundary_shift':
-            # Boundary error - medium confidence
-            confidence = np.random.uniform(0.55, 0.75)
-        elif modification_type == 'label_swap':
-            # Wrong label - lower confidence
-            confidence = np.random.uniform(0.35, 0.55)
-        elif modification_type == 'added_false_marker':
-            # False positive - low confidence
-            confidence = np.random.uniform(0.20, 0.45)
-        else:
-            # Default medium confidence
-            confidence = np.random.uniform(0.50, 0.80)
-        
-        return confidence
-    
-    def shift_timestamp(self, timestamp_str: str, shift_seconds: float) -> str:
-        """Shift a timestamp by given seconds"""
-        dt = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S.%f')
-        new_dt = dt + timedelta(seconds=shift_seconds)
-        return new_dt.strftime('%Y-%m-%d %H:%M:%S.%f')
-    
-    def modify_timestamps(self, lines: List[str], percent: float, 
-                         shift_range: Tuple[float, float] = (-5.0, 5.0)) -> List[str]:
-        """
-        Randomly shift timestamps to test temporal accuracy
-        
-        Args:
-            lines: Input lines
-            percent: Percentage of lines to modify (0-100)
-            shift_range: Min and max shift in seconds
-        """
-        num_to_modify = int(len(lines) * (percent / 100))
-        indices = random.sample(range(len(lines)), num_to_modify)
-        
-        modified = lines.copy()
-        
-        for idx in indices:
-            parts = lines[idx].strip().split('\t')
-            if len(parts) >= 3:
-                shift = random.uniform(shift_range[0], shift_range[1])
-                parts[0] = self.shift_timestamp(parts[0], shift)
-                modified[idx] = '\t'.join(parts) + '\n'
-                
-                self.modifications_log.append({
-                    'line': idx,
-                    'type': 'timestamp_shift',
-                    'shift': shift
-                })
-        
-        return modified
-    
-    def remove_segment_markers(self, lines: List[str], percent: float) -> List[str]:
-        """
-        Remove segment start/end markers to create false negatives
-        
-        Args:
-            lines: Input lines
-            percent: Percentage of segment markers to remove
-        """
-        modified = lines.copy()
-        
-        # Find all lines with segment markers
-        marker_indices = []
-        for i, line in enumerate(lines):
-            parts = line.strip().split('\t')
-            if len(parts) >= 4 and parts[3].strip():
-                marker_indices.append(i)
-        
-        if not marker_indices:
-            return modified
-        
-        num_to_remove = int(len(marker_indices) * (percent / 100))
-        indices_to_remove = random.sample(marker_indices, num_to_remove)
-        
-        # Remove from end to preserve indices
-        for idx in sorted(indices_to_remove, reverse=True):
-            modified.pop(idx)
-            
-            self.modifications_log.append({
-                'line': idx,
-                'type': 'removed_segment_marker'
-            })
-        
-        return modified
-    
-    def add_false_segment_markers(self, lines: List[str], num_to_add: int) -> List[str]:
-        """
-        Add fake segment markers to create false positives
-        
-        Args:
-            lines: Input lines
-            num_to_add: Number of false markers to add
-        """
-        modified = lines.copy()
-        
-        # Find lines without segment markers where we can insert
-        eligible_indices = []
-        for i, line in enumerate(lines):
-            parts = line.strip().split('\t')
-            if len(parts) >= 3:
-                has_annotation = len(parts) >= 4 and parts[3].strip()
-                if not has_annotation:
-                    eligible_indices.append(i)
-        
-        if not eligible_indices:
-            return modified
-        
-        num_to_add = min(num_to_add, len(eligible_indices))
-        indices_to_modify = random.sample(eligible_indices, num_to_add)
-        
-        for idx in indices_to_modify:
-            parts = modified[idx].strip().split('\t')
-            
-            # Add a fake segment marker
-            fake_id = random.randint(1, 8)
-            fake_annotation = str(fake_id)
-            
-            # Ensure we have 4 columns
-            while len(parts) < 3:
-                parts.append('')
-            
-            parts.append(fake_annotation)
-            modified[idx] = '\t'.join(parts) + '\n'
-            
-            self.modifications_log.append({
-                'line': idx,
-                'type': 'added_false_marker',
-                'annotation': fake_annotation
-            })
-        
-        return modified
-    
-    def shift_segment_boundaries(self, lines: List[str], percent: float,
-                                shift_range: Tuple[float, float] = (-15.0, 15.0)) -> List[str]:
-        """
-        Shift segment start/end times to test boundary detection
-        
-        Args:
-            lines: Input lines
-            percent: Percentage of segment boundaries to shift
-            shift_range: Min and max shift in seconds
-        """
-        modified = lines.copy()
-        
-        # Find segment boundary markers (lines with activity annotations)
-        boundary_indices = []
-        for i, line in enumerate(lines):
-            parts = line.strip().split('\t')
-            if len(parts) >= 4 and parts[3].strip():
-                boundary_indices.append(i)
-        
-        if not boundary_indices:
-            return modified
-        
-        num_to_shift = int(len(boundary_indices) * (percent / 100))
-        indices_to_shift = random.sample(boundary_indices, num_to_shift)
-        
-        for idx in indices_to_shift:
-            parts = lines[idx].strip().split('\t')
-            if len(parts) >= 3:
-                shift = random.uniform(shift_range[0], shift_range[1])
-                parts[0] = self.shift_timestamp(parts[0], shift)
-                modified[idx] = '\t'.join(parts) + '\n'
-                
-                self.modifications_log.append({
-                    'line': idx,
-                    'type': 'boundary_shift',
-                    'shift': shift
-                })
-        
-        return modified
-    
-    def swap_segment_labels(self, lines: List[str], percent: float) -> List[str]:
-        """
-        Swap segment IDs to test label accuracy
-        
-        Args:
-            lines: Input lines
-            percent: Percentage of segment labels to swap
-        """
-        modified = lines.copy()
-        
-        segment_indices = []
-        for i, line in enumerate(lines):
-            parts = line.strip().split('\t')
-            if len(parts) >= 4 and parts[3].strip():
-                segment_indices.append(i)
-        
-        if not segment_indices:
-            return modified
-        
-        num_to_swap = int(len(segment_indices) * (percent / 100))
-        indices_to_swap = random.sample(segment_indices, num_to_swap)
-        
-        for idx in indices_to_swap:
-            parts = lines[idx].strip().split('\t')
-            annotation = parts[3]
-            
-            # Change segment ID to a different random one
-            new_id = random.randint(1, 9)
-            parts[3] = str(new_id)
-            modified[idx] = '\t'.join(parts) + '\n'
-            
-            self.modifications_log.append({
-                'line': idx,
-                'type': 'label_swap',
-                'original': annotation,
-                'new': parts[3]
-            })
-        
-        return modified
-    
-    def create_sanity_check_variants(self, input_file: str, output_dir: str = "./SanityCheck"):
-        """
-        Create multiple modified versions for comprehensive sanity checking
-        All variants include confidence scores for ROC curve testing.
-        
-        Args:
-            input_file: Path to original data file
-            output_dir: Directory for output files
-        """
-        
-        lines = self.read_file(input_file)
         base_name = os.path.splitext(os.path.basename(input_file))[0]
         
         variants = {
             'perfect': {
-                'description': 'Perfect copy (should get 100% metrics, high confidence)',
-                'lines': lines.copy(),
-                'modifications': []
+                'description': 'Perfect predictions with high confidence (0.85-0.95)',
+                'generator': lambda: self.create_continuous_predictions_from_gt(
+                    input_file, 'perfect', resolution_seconds=None
+                )
             },
             'small_time_shift': {
-                'description': 'Small timestamp shifts (1-3s) - within tolerance, high confidence',
-                'lines': None,
-                'modifications': ['timestamp_shift']
+                'description': 'Small timestamp shifts (1-3s), medium-high confidence (0.50-0.70)',
+                'generator': lambda: self.create_continuous_predictions_with_time_shift(
+                    input_file, 'small_time_shift', shift_range=(1.0, 3.0), resolution_seconds=1.0
+                )
             },
             'large_time_shift': {
-                'description': 'Large timestamp shifts (10-20s) - beyond threshold, medium confidence',
-                'lines': None,
-                'modifications': ['large_timestamp_shift']
+                'description': 'Large timestamp shifts (10-20s), medium confidence (0.50-0.70)',
+                'generator': lambda: self.create_continuous_predictions_with_time_shift(
+                    input_file, 'large_time_shift', shift_range=(10.0, 20.0), resolution_seconds=1.0
+                )
             },
             'boundary_errors': {
-                'description': 'Shifted segment boundaries (5-12s), medium-low confidence',
-                'lines': None,
-                'modifications': ['boundary_shift']
+                'description': 'Shifted segment boundaries (5-12s), medium confidence (0.50-0.70)',
+                'generator': lambda: self.create_continuous_predictions_with_boundary_shift(
+                    input_file, 'boundary_errors', shift_range=(5.0, 12.0), resolution_seconds=1.0
+                )
             },
             'missing_segments': {
-                'description': '30% of segment markers removed (false negatives)',
-                'lines': None,
-                'modifications': ['remove_segments']
+                'description': '30% of segments removed (false negatives), medium-high confidence (0.65-0.80)',
+                'generator': lambda: self.create_continuous_predictions_with_missing_segments(
+                    input_file, 'missing_segments', missing_percent=30, resolution_seconds=1.0
+                )
             },
             'false_positives': {
-                'description': '10 false segment markers added (low confidence)',
-                'lines': None,
-                'modifications': ['add_false_segments']
+                'description': '10 false segments added, low-medium confidence (0.30-0.50)',
+                'generator': lambda: self.create_continuous_predictions_with_false_positives(
+                    input_file, 'false_positives', num_false_segments=10, resolution_seconds=1.0
+                )
             },
             'label_confusion': {
-                'description': 'Swapped segment labels (low confidence)',
-                'lines': None,
-                'modifications': ['label_swap']
+                'description': '40% of segment labels swapped, low confidence (0.15-0.30)',
+                'generator': lambda: self.create_continuous_predictions_with_label_swap(
+                    input_file, 'label_confusion', swap_percent=40, resolution_seconds=1.0
+                )
             },
             'combined_errors': {
-                'description': 'Multiple error types combined (varied confidence)',
-                'lines': None,
-                'modifications': ['combined']
+                'description': 'Multiple error types combined, medium confidence (0.40-0.60)',
+                'generator': lambda: self._create_combined_errors(input_file)
             }
         }
         
-        # Generate modified lines for each variant
-        for variant_name, variant_data in variants.items():
-            self.modifications_log = []  # Reset log for each variant
-            
-            if variant_name == 'perfect':
-                continue  # Already set
-            
-            elif variant_name == 'small_time_shift':
-                variant_data['lines'] = self.modify_timestamps(lines, 50, (1.0, 3.0))
-            
-            elif variant_name == 'large_time_shift':
-                variant_data['lines'] = self.modify_timestamps(lines, 50, (10.0, 20.0))
-            
-            elif variant_name == 'boundary_errors':
-                variant_data['lines'] = self.shift_segment_boundaries(lines, 70, (5.0, 12.0))
-            
-            elif variant_name == 'missing_segments':
-                variant_data['lines'] = self.remove_segment_markers(lines, 30)
-            
-            elif variant_name == 'false_positives':
-                variant_data['lines'] = self.add_false_segment_markers(lines, 10)
-            
-            elif variant_name == 'label_confusion':
-                variant_data['lines'] = self.swap_segment_labels(lines, 40)
-            
-            elif variant_name == 'combined_errors':
-                combined = lines.copy()
-                self.modifications_log = []
-                combined = self.modify_timestamps(combined, 20, (-3.0, 3.0))
-                combined = self.shift_segment_boundaries(combined, 30, (-5.0, 5.0))
-                combined = self.remove_segment_markers(combined, 15)
-                combined = self.add_false_segment_markers(combined, 5)
-                combined = self.swap_segment_labels(combined, 10)
-                variant_data['lines'] = combined
-        
-        # Write all variants with confidence scores
+        # Generate and write each variant
         summary = []
-        for variant_name, variant_data in variants.items():
+        for variant_name, variant_info in variants.items():
+            print(f"Creating {variant_name}...")
+            
+            # Generate predictions
+            predictions = variant_info['generator']()
+            
+            # Write to file
             output_file = os.path.join(output_dir, f"{base_name}_{variant_name}.txt")
-            self.write_file(output_file, variant_data['lines'], add_confidence=True)
+            with open(output_file, 'w') as f:
+                f.write('\n'.join(predictions))
+            
+            print(f"  Created {len(predictions)} predictions")
             
             summary.append(f"{variant_name:20s} -> {output_file}")
-            summary.append(f"{'':20s}    {variant_data['description']}")
+            summary.append(f"{'':20s}    {variant_info['description']}")
         
         # Write summary file
         summary_file = os.path.join(output_dir, "README.txt")
@@ -415,21 +503,84 @@ class SanityCheckModifier:
             f.write(f"Original file: {input_file}\n")
             f.write(f"Created {len(variants)} variants for testing\n\n")
             f.write("All variants include confidence scores for ROC curve testing.\n")
+            f.write("Each variant has continuous predictions (every second annotated).\n")
             f.write("Confidence scores reflect prediction quality:\n")
-            f.write("  - High (0.85-0.95): Perfect or near-perfect predictions\n")
-            f.write("  - Medium (0.50-0.75): Timing errors or boundary shifts\n")
-            f.write("  - Low (0.20-0.55): Label errors or false positives\n\n")
+            f.write("  - High (0.85-0.95): Perfect predictions\n")
+            f.write("  - Medium (0.50-0.70): Timing errors\n")
+            f.write("  - Low (0.15-0.30): Label errors\n\n")
             f.write("\n".join(summary))
             f.write("\n\n" + "=" * 70 + "\n")
             f.write("Usage: Compare each variant against the original file\n")
             f.write("using the SegmentEvaluator to validate metrics and ROC curves.\n")
         
         print(f"\nCreated {len(variants)} sanity check variants in: {output_dir}")
-        print(f"All files include confidence scores for ROC analysis")
+        print(f"All files include continuous predictions with confidence scores")
         print(f"See {summary_file} for details")
         
         return variants
-
+    
+    def _create_combined_errors(self, gt_file: str) -> List[str]:
+        """Create variant with multiple types of errors"""
+        gt_lines = self.read_file(gt_file)
+        segments = self._extract_segments_from_lines(gt_lines)
+        
+        all_activities = list(set(seg['activity'] for seg in segments))
+        predictions = []
+        
+        for idx, seg in enumerate(segments):
+            activity = seg['activity']
+            start_time = seg['start_time']
+            end_time = seg['end_time']
+            sensor = seg['sensor']
+            
+            # Randomly apply different modifications
+            modification = random.choice(['none', 'shift', 'boundary', 'label_swap', 'skip'])
+            
+            # Determine confidence based on modification type
+            if modification == 'skip':
+                continue  # Missing segment - no predictions
+            
+            elif modification == 'none':
+                # Correct prediction - HIGH confidence
+                confidence_range = (0.85, 0.95)
+            
+            elif modification in ['shift', 'boundary']:
+                # Time shift - MEDIUM confidence (labels correct, timing wrong)
+                confidence_range = (0.50, 0.70)
+            
+            elif modification == 'label_swap':
+                # Wrong label - LOW confidence
+                confidence_range = (0.15, 0.30)
+                # Swap label
+                if len(all_activities) > 1:
+                    other_activities = [a for a in all_activities if a != activity]
+                    activity = random.choice(other_activities)
+            
+            # Apply time modifications
+            if modification == 'shift':
+                shift = random.uniform(-3.0, 3.0)
+                start_time += timedelta(seconds=shift)
+                end_time += timedelta(seconds=shift)
+            
+            elif modification == 'boundary':
+                start_shift = random.uniform(-2.0, 2.0)
+                end_shift = random.uniform(-2.0, 2.0)
+                start_time += timedelta(seconds=start_shift)
+                end_time += timedelta(seconds=end_shift)
+            
+            # Generate predictions with appropriate confidence
+            if end_time > start_time:
+                current_time = start_time
+                while current_time <= end_time:
+                    confidence = np.random.uniform(*confidence_range)  # ← Use the range!
+                    timestamp_str = current_time.strftime('%Y-%m-%d %H:%M:%S.%f')
+                    predictions.append(f"{timestamp_str} {sensor} {sensor} ON {activity} {confidence:.6f}")
+                    current_time += timedelta(seconds=1.0)
+        
+        # Sort by timestamp
+        predictions.sort()
+        
+        return predictions
 
 # Example usage
 if __name__ == "__main__":
@@ -438,18 +589,18 @@ if __name__ == "__main__":
     
     # Create comprehensive sanity check variants with confidence scores
     input_file = "../data/P001.txt"
-    variants = modifier.create_sanity_check_variants(input_file, "./SanityCheck")
+    variants = modifier.create_sanity_check_variants(input_file, "../SanityCheck")
     
     print("\n" + "="*70)
-    print("SANITY CHECK FILES CREATED WITH CONFIDENCE SCORES")
+    print("SANITY CHECK FILES CREATED WITH CONTINUOUS PREDICTIONS")
     print("="*70)
     print("\nTo test your SegmentEvaluator with ROC curves:")
     print("\n  from segment_evaluator import SegmentEvaluator")
     print("  evaluator = SegmentEvaluator()")
     print("\n  # Test with ROC curves")
     print("  results = evaluator.evaluate_with_dual_roc(")
-    print("      'SanityCheck/P001_perfect.txt',")
-    print("      'data/P001.txt'")
+    print("      '../SanityCheck/P001_perfect.txt',")
+    print("      '../data/P001.txt'")
     print("  )")
     print("\n  # Plot ROC curves")
     print("  evaluator.plot_dual_roc_curves(results, 'perfect_roc.png')")
