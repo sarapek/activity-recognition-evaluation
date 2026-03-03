@@ -1,0 +1,198 @@
+================================================================================
+SENSITIVITY ANALYSIS - EXPERIMENT PARAMETERS
+================================================================================
+
+Purpose: Determine which evaluation parameters have the most impact on
+         segment-level performance metrics.
+
+Method: One-at-a-time sensitivity analysis - vary each parameter individually
+        while keeping others fixed at baseline values.
+
+Total Experiments: 8 (1 baseline + 7 variations)
+Estimated Runtime: ~6 hours (45 min per experiment)
+
+================================================================================
+BASELINE CONFIGURATION (Already Completed)
+================================================================================
+
+Experiment Name:        baseline
+Overlap Threshold:      0.5
+Start Time Threshold:   30.0 seconds
+Max Gap Seconds:        60.0 seconds
+Confidence Threshold:   0.5
+
+Description: Standard configuration with balanced settings
+
+Results Location: ./output/run_20260218_231656_5fold_overlap0.500/
+
+================================================================================
+EXPERIMENT 1: Overlap Threshold = 0.3
+================================================================================
+
+Experiment Name:        overlap_0.3
+Overlap Threshold:      0.3  ← VARIED
+Start Time Threshold:   30.0 seconds
+Max Gap Seconds:        60.0 seconds
+Confidence Threshold:   0.5
+
+Description: More lenient segment matching - segments need only 30% temporal
+             overlap to be considered a match. Expected: Higher recall (more
+             matches), lower precision (more false matches).
+
+================================================================================
+EXPERIMENT 2: Overlap Threshold = 0.7
+================================================================================
+
+Experiment Name:        overlap_0.7
+Overlap Threshold:      0.7  ← VARIED
+Start Time Threshold:   30.0 seconds
+Max Gap Seconds:        60.0 seconds
+Confidence Threshold:   0.5
+
+Description: Stricter segment matching - segments need 70% temporal overlap
+             to be considered a match. Expected: Lower recall (fewer matches),
+             higher precision (only high-quality matches).
+
+================================================================================
+EXPERIMENT 3: Start Time Threshold = 0 seconds
+================================================================================
+
+Experiment Name:        start_time_0
+Overlap Threshold:      0.5
+Start Time Threshold:   0.0 seconds  ← VARIED
+Max Gap Seconds:        60.0 seconds
+Confidence Threshold:   0.5
+
+Description: No tolerance for temporal misalignment - predicted segments must
+             start at exactly the same time as GT segments (within 1 second).
+             Expected: Lower recall (strict timing requirement), higher
+             precision (only perfectly timed matches).
+
+================================================================================
+EXPERIMENT 4: Start Time Threshold = 15 seconds
+================================================================================
+
+Experiment Name:        start_time_15
+Overlap Threshold:      0.5
+Start Time Threshold:   15.0 seconds  ← VARIED
+Max Gap Seconds:        60.0 seconds
+Confidence Threshold:   0.5
+
+Description: Moderate tolerance for temporal misalignment - predicted segments
+             can start up to 15 seconds before/after GT segments. Expected:
+             Moderate recall, moderate precision.
+
+================================================================================
+EXPERIMENT 5: Start Time Threshold = 60 seconds
+================================================================================
+
+Experiment Name:        start_time_60
+Overlap Threshold:      0.5
+Start Time Threshold:   60.0 seconds  ← VARIED
+Max Gap Seconds:        60.0 seconds
+Confidence Threshold:   0.5
+
+Description: Generous tolerance for temporal misalignment - predicted segments
+             can start up to 60 seconds before/after GT segments. Expected:
+             Higher recall (lenient timing), potentially lower precision (may
+             match incorrect segments).
+
+================================================================================
+EXPERIMENT 6: Max Gap = 30 seconds
+================================================================================
+
+Experiment Name:        gap_30
+Overlap Threshold:      0.5
+Start Time Threshold:   30.0 seconds
+Max Gap Seconds:        30.0 seconds  ← VARIED
+Confidence Threshold:   0.5
+
+Description: More aggressive segmentation - predictions with gaps > 30s are
+             split into separate segments. Expected: More predicted segments,
+             potentially lower segment precision (more false positives), but
+             may better capture brief interruptions.
+
+================================================================================
+EXPERIMENT 7: Max Gap = 120 seconds
+================================================================================
+
+Experiment Name:        gap_120
+Overlap Threshold:      0.5
+Start Time Threshold:   30.0 seconds
+Max Gap Seconds:        120.0 seconds  ← VARIED
+Confidence Threshold:   0.5
+
+Description: Less aggressive segmentation - predictions with gaps up to 120s
+             are merged into single segments. Expected: Fewer predicted
+             segments, potentially higher segment precision (fewer false
+             positives), but may miss brief activity transitions.
+
+================================================================================
+CONFIDENCE THRESHOLD ANALYSIS
+================================================================================
+
+NOTE: Confidence threshold analysis is performed using ROC curves, which show
+      performance across ALL threshold values (0.0 to 1.0) simultaneously.
+
+Already Completed:
+- ROC curves for all activities (frame-level and segment-level)
+- Two operating points analyzed:
+  * Confidence = 0.0: High recall (0.754), low precision (0.291)
+  * Confidence = 0.5: Balanced (recall=0.752, precision=0.403)
+
+Results show: ~39% improvement in segment precision when using conf=0.5
+              vs conf=0.0, with minimal impact on recall (-0.3%).
+
+================================================================================
+KEY METRICS TO ANALYZE
+================================================================================
+
+For each experiment, compare:
+
+1. Macro-Average Segment Metrics:
+   - Segment Precision (unweighted average across activities)
+   - Segment Recall (unweighted average across activities)
+   - Segment F1 Score (unweighted average across activities)
+   - Segment AUC (unweighted average across activities)
+
+2. Weighted-Average Segment Metrics:
+   - Segment Precision (weighted by GT duration)
+   - Segment Recall (weighted by GT duration)
+   - Segment F1 Score (weighted by GT duration)
+   - Segment AUC (weighted by GT duration)
+
+3. Per-Activity Analysis:
+   - Compare impact on individual activities (Activity 1-8)
+   - Identify which activities are most sensitive to each parameter
+
+================================================================================
+EXPECTED RUNNING TIME
+================================================================================
+
+Each experiment:    ~45 minutes (5-fold cross-validation on 251 files)
+Total (7 new):      ~5.25 hours
+With baseline (8):  ~6 hours
+
+Recommendation: Run overnight or during non-working hours
+
+================================================================================
+AUTOMATION
+================================================================================
+
+To run all experiments automatically:
+
+    python scripts/run_sensitivity_analysis.py
+
+This script will:
+1. Run all 7 experiments sequentially
+2. Save individual logs for each experiment
+3. Extract key metrics from each run
+4. Generate comparison tables
+5. Create summary JSON with all results
+
+Results saved to: ./sensitivity_analysis/
+- sensitivity_analysis_results.txt (comparison table)
+- final_results.json (all metrics in JSON format)
+- <experiment_name>.log (individual logs)
+
+================================================================================

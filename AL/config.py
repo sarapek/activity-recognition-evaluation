@@ -11,6 +11,7 @@ import argparse
 import copy
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.calibration import CalibratedClassifierCV
 
 
 MODE_TRAIN = 'TRAIN'
@@ -34,7 +35,7 @@ class Config:
     def __init__(self):
         """ Constructor
         """
-        self.activitynames = ['1', '2', '3', '4', '5', '6', '7', '8']
+        self.activitynames = [str(i) for i in range(1, 25)]  # Activities 1-24
         self.current_seconds_of_day = 0
         self.current_timestamp = 0
         self.day_of_week = 0
@@ -80,12 +81,12 @@ class Config:
         self.features = 0
         self.num_features = 0
         self.seconds_in_a_day = 86400
-        self.max_window = 30
+        self.max_window = 5  # Reduced from 30 to handle sparse activities
         self.add_pca = False  # Add principal components to feature vector
         self.weightinc = 0.01
         self.windata = np.zeros((self.max_window, 3), dtype=int)
         self.clf = RandomForestClassifier(n_estimators=80,
-                                          max_features=8,
+                                          max_features='sqrt',
                                           bootstrap=True,
                                           criterion="entropy",
                                           min_samples_split=20,

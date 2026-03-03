@@ -70,9 +70,18 @@ def visualize_segments_timeline(
     # Create figure - single axis
     fig, ax = plt.subplots(figsize=figsize)
     
-    # Color map for segments
-    colors = plt.cm.Set3(np.linspace(0, 1, len(segment_ids)))
-    color_map = {seg_id: colors[i] for i, seg_id in enumerate(segment_ids)}
+    # Color map for segments (Same as ROC - default matplotlib colors)
+    custom_colors = {
+        '1': '#1f77b4',  # Blue
+        '2': '#ff7f0e',  # Orange
+        '3': '#2ca02c',  # Green
+        '4': '#d62728',  # Red
+        '5': '#9467bd',  # Purple
+        '6': '#8c564b',  # Brown
+        '7': '#e377c2',  # Pink
+        '8': '#7f7f7f'   # Gray
+    }
+    color_map = {seg_id: custom_colors.get(seg_id, 'gray') for seg_id in segment_ids}
     
     # Each segment ID gets 2 rows: GT on top, Pred on bottom
     num_rows = len(segment_ids) * 2
@@ -140,7 +149,7 @@ def visualize_segments_timeline(
                 facecolor=color_map[seg_id],
                 edgecolor='red',
                 linewidth=2,
-                alpha=0.7,
+                alpha=0.3,
                 linestyle='--'
             )
             ax.add_patch(rect)
@@ -245,9 +254,18 @@ def visualize_segments_combined(
     # Create figure
     fig, ax = plt.subplots(figsize=figsize)
     
-    # Color map
-    colors = plt.cm.Set3(np.linspace(0, 1, len(segment_ids)))
-    color_map = {seg_id: colors[i] for i, seg_id in enumerate(segment_ids)}
+    # Color map (Same as ROC - default matplotlib colors)
+    custom_colors = {
+        '1': '#1f77b4',  # Blue
+        '2': '#ff7f0e',  # Orange
+        '3': '#2ca02c',  # Green
+        '4': '#d62728',  # Red
+        '5': '#9467bd',  # Purple
+        '6': '#8c564b',  # Brown
+        '7': '#e377c2',  # Pink
+        '8': '#7f7f7f'   # Gray
+    }
+    color_map = {seg_id: custom_colors.get(seg_id, 'gray') for seg_id in segment_ids}
     
     # Setup axes
     ax.set_ylabel('Segment ID', fontsize=12, fontweight='bold')

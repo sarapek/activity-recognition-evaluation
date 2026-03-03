@@ -41,34 +41,56 @@ Tested versions:
 
 ```
 project/
-├── data/                  # Raw CASAS data files
-├── data_filtered/         # Filtered data (output from filter_activities.py)
-├── data_spaces/           # Unfiltered data reshaped with spaces instead of tabs as delimeters
-├── output/                # Timestamped run directories created by train_and_evaluate.py
-│   ├── run_20241019_143022_5fold_overlap0.500/
-│   │   ├── config.json
-│   │   ├── cross_validation_summary.json
-│   │   ├── roc_all_folds_averaged.png
-│   │   ├── fold_1/
-│   │   │   ├── fold_summary.json
-│   │   │   ├── roc_fold1.png
-│   │   │   ├── fold1_pred_0_P001.txt
-│   │   │   └── timeline_P001.png
-│   │   ├── fold_2/
-│   │   └── ...
-│   └── run_20241020_091534_5fold_overlap0.500/
-│       └── ...
-├── AL/
-│   ├── al.py              # Main activity learning script
-│   ├── README.md          # Detailed AL documentation
-│   └── model/             # Trained models saved here
-├── evaluation/
-│   ├── segment_evaluator.py
-│   ├── test_evaluation.py
-│   ├── modify_file.py
-│   └── visualize_segments_timeline.py
-├── filter_activities.py
-└── train_and_evaluate.py
+├── README.md
+├── train_and_evaluate.py       # Main training & evaluation pipeline
+├── filter_activities.py        # Data preprocessing
+│
+├── data_filtered_normal/       # Active: Filtered training data
+├── data_raw_normal/            # Active: Raw sensor data
+│
+├── AL/                         # Activity Learning (Dr. Cook's algorithm)
+│   ├── al.py                   # Main AL script
+│   ├── README.md               # Detailed AL documentation
+│   └── config.py
+│
+├── evaluation/                 # Evaluation tools
+│   ├── segment_evaluator.py   # Core evaluation engine
+│   ├── test_evaluation.py     # Main testing interface
+│   ├── visualize_segments_timeline.py  # Timeline visualization
+│   ├── analyze_current_dataset.py      # Dataset analysis
+│   └── test_scripts/          # Test utilities
+│       ├── modify_file.py
+│       ├── run_sanity_check.py
+│       ├── generate_bad_roc_test_files.py
+│       ├── test_bad_roc_files.py
+│       ├── test_metrics_comprehensive.py
+│       └── test_roc_auc_validation.py
+│
+├── scripts/                    # Additional scripts
+│   └── run_sensitivity_analysis.py  # Parameter sensitivity analysis
+│
+├── docs/                       # Documentation
+│   └── SENSITIVITY_ANALYSIS_PARAMETERS.txt
+│
+├── results/                    # All experiment outputs (gitignored)
+│   ├── training_runs/          # Training run outputs
+│   │   └── run_YYYYMMDD_HHMMSS_5fold_overlap0.500/
+│   │       ├── config.json
+│   │       ├── cross_validation_summary.json
+│   │       ├── roc_all_folds_averaged.png
+│   │       └── fold_1/ ... fold_5/
+│   ├── sanity_checks/          # Sanity check test files & outputs
+│   ├── bad_roc_tests/          # ROC validation test files
+│   └── sensitivity/            # Sensitivity analysis outputs
+│
+├── analysis_results/           # Analysis outputs (gitignored)
+│   ├── class_distribution_analysis.png
+│   ├── class_distribution_analysis.json
+│   ├── DATA_CONFIGURATION_ANALYSIS.txt
+│   └── metrics_table.tsv
+│
+├── model/                      # Trained models (gitignored)
+└── old_datasets/               # Archived datasets (gitignored)
 ```
 
 ---
@@ -77,13 +99,13 @@ project/
 
 ### Filter Activities with `filter_activities.py`
 
-The filter script processes raw sensor data to extract only relevant activities (activity numbers 1-8), making the data suitable for use with `al.py`.
+The filter script processes raw sensor data to extract all numbered activities, making the data suitable for use with `al.py`.
 
 **What it does:**
-- Filters sensor events to keep only activities 1-8
+- Keeps ALL numbered activities (1, 2, 3, ... 24, 27, etc.)
 - Removes "Other_Activity" and unlabeled sensor events
 - Handles both start/end markers and point annotations
-- Creates cleaned training data in `data_filtered/` directory
+- Creates cleaned training data in `data_filtered_normal/` directory
 
 **Usage:**
 
@@ -107,20 +129,22 @@ python filter_activities.py
 ```
 
 **Notes:**
-- Only events with activity labels 1-8 are kept
+- All events with numbered activity labels are kept (no activity range limitation)
 - Lines without annotations or with "Other_Activity" are removed
 - This creates cleaner training data for the AL model
+- This approach allows the model to learn all activities while evaluation focuses on specific activities of interest
 
 ---
 
 ## Training & Evaluation Pipeline
 
-### Two Main Evaluation Scripts
+### Three Main Evaluation Scripts
 
-This system provides two complementary evaluation scripts:
+This system provides three complementary evaluation scripts:
 
 1. **`train_and_evaluate.py`** - For real model training and testing
 2. **`test_evaluation.py`** - For validating that your evaluation metrics work correctly
+3. **`scripts/run_sensitivity_analysis.py`** - For parameter sensitivity analysis (thesis Chapter 4.3)
 
 ---
 
@@ -177,7 +201,7 @@ The script performs **stratified 5-fold cross-validation**:
 Creates a **timestamped run directory**:
 
 ```
-./output/run_YYYYMMDD_HHMMSS_5fold_overlap0.500/
+./results/training_runs/run_YYYYMMDD_HHMMSS_5fold_overlap0.500/
 ├── config.json                          # Run configuration
 ├── cross_validation_summary.json        # Aggregated metrics across all folds
 ├── roc_all_folds_averaged.png          # Averaged ROC curves
@@ -354,7 +378,7 @@ Creates 8 synthetic test variants from ground truth data, each with specific kno
 ```
 Create sanity check files? (y/n):
 ```
-- **Yes**: Generates all 8 test variants in `./SanityCheck/` directory
+- **Yes**: Generates all 8 test variants in `./results/sanity_checks/` directory
 - **No**: Uses existing files (faster if you've already created them)
 
 **2. Timeline Visualization**
@@ -448,7 +472,7 @@ false_positives    0.8571     0.7500     1.0000      0.875      0.820
 label_confusion    0.7234     0.7567     0.6923      0.745      0.728
 combined_errors    0.6789     0.6912     0.6667      0.698      0.672
 
-Detailed results saved to: ./SanityCheck/evaluation_results.json
+Detailed results saved to: ./results/sanity_checks/evaluation_results.json
 ```
 
 #### Understanding Sanity Check Results
@@ -500,11 +524,129 @@ Detailed results saved to: ./SanityCheck/evaluation_results.json
 | Testing evaluation changes | `test_evaluation.py` | Validate metric calculations |
 | Publication results | `train_and_evaluate.py` | Real model metrics for reporting |
 | Understanding metric behavior | `test_evaluation.py` | Educational/diagnostic analysis |
+| **Parameter sensitivity (thesis)** | **`scripts/run_sensitivity_analysis.py`** | **Determine which settings impact performance** |
+| **Justifying parameter choices** | **`scripts/run_sensitivity_analysis.py`** | **Systematic ablation study** |
 
 **Recommended Workflow:**
 1. **First**: Run `test_evaluation.py` to verify your evaluation system
 2. **Then**: Run `train_and_evaluate.py` to get real model performance
-3. **If metrics look weird**: Go back to `test_evaluation.py` to debug
+3. **For thesis/publication**: Run `scripts/run_sensitivity_analysis.py` to analyze parameter impact
+4. **If metrics look weird**: Go back to `test_evaluation.py` to debug
+
+---
+
+### 3. Sensitivity Analysis: `scripts/run_sensitivity_analysis.py`
+
+This script automates parameter sensitivity analysis by running multiple experiments, varying one evaluation parameter at a time. Use this when you want to **determine which settings most impact performance** for your thesis or publication.
+
+#### Basic Usage
+
+```bash
+python scripts/run_sensitivity_analysis.py
+```
+
+#### What It Does
+
+1. **Runs 7 experiments** varying evaluation parameters one-at-a-time
+2. **Keeps baseline settings** for non-varied parameters
+3. **Saves individual logs** for each experiment
+4. **Extracts key metrics** automatically
+5. **Generates comparison tables** showing parameter impact
+
+#### Experiment Configuration
+
+**Baseline Settings:**
+- overlap_threshold = 0.5
+- start_time_threshold = 30.0s
+- max_gap_seconds = 60.0s
+- confidence_threshold = 0.5
+
+**Parameters Tested:**
+
+| Parameter | Baseline | Test Values | Purpose |
+|-----------|----------|-------------|---------|
+| **overlap_threshold** | 0.5 | 0.3, 0.7 | Segment matching strictness |
+| **start_time_threshold** | 30s | 0s, 15s, 60s | Temporal alignment tolerance |
+| **max_gap_seconds** | 60s | 30s, 120s | Segmentation continuity |
+| **confidence_threshold** | N/A | *See ROC curves* | Analyzed via ROC, not separate runs |
+
+**Note:** Confidence threshold analysis is already available in ROC curves, which show performance across all thresholds (0.0-1.0). No separate experiments needed!
+
+#### Output Structure
+
+```
+./results/sensitivity/
+├── experiment_configurations.json    # All parameter configurations
+├── sensitivity_analysis_results.txt  # Comparison table (human-readable)
+├── final_results.json               # All metrics in JSON format
+├── intermediate_results.json         # Partial results (updated during run)
+├── overlap_0.3.log                  # Individual experiment logs
+├── overlap_0.7.log
+├── start_time_0.log
+├── start_time_15.log
+├── start_time_60.log
+├── gap_30.log
+└── gap_120.log
+```
+
+#### Example Comparison Table
+
+```
+SENSITIVITY ANALYSIS RESULTS
+====================================================================================================
+
+MACRO-AVERAGE SEGMENT METRICS
+----------------------------------------------------------------------------------------------------
+Experiment           Precision       Recall          F1            AUC
+----------------------------------------------------------------------------------------------------
+baseline                0.3868       0.7096       0.4954       0.5684
+overlap_0.3             0.3245       0.7845       0.4589       0.5892
+overlap_0.7             0.4512       0.6234       0.5234       0.5456
+start_time_0            0.3678       0.6789       0.4756       0.5512
+start_time_15           0.3756       0.6923       0.4845       0.5601
+start_time_60           0.3989       0.7234       0.5123       0.5789
+gap_30                  0.3156       0.7456       0.4423       0.5634
+gap_120                 0.4234       0.6834       0.5189       0.5723
+
+
+WEIGHTED-AVERAGE SEGMENT METRICS
+----------------------------------------------------------------------------------------------------
+Experiment           Precision       Recall          F1            AUC
+----------------------------------------------------------------------------------------------------
+baseline                0.4034       0.7515       0.5202       0.6057
+overlap_0.3             0.3456       0.7923       0.4812       0.6189
+overlap_0.7             0.4789       0.6456       0.5456       0.5834
+...
+```
+
+#### When to Use This Script
+
+**Use `scripts/run_sensitivity_analysis.py` when:**
+- Writing thesis Chapter 4.3 on parameter sensitivity
+- Determining optimal evaluation settings
+- Justifying parameter choices in publications
+- Understanding which settings most impact results
+- Conducting ablation studies
+
+**This script helps answer questions like:**
+- "How does overlap threshold affect segment precision?"
+- "Is temporal alignment tolerance important?"
+- "What's the optimal gap threshold for this dataset?"
+- "Which parameters should I report in my thesis?"
+
+#### Estimated Runtime
+
+- **Per experiment**: ~45 minutes (5-fold cross-validation on 251 files)
+- **Total (7 experiments)**: ~5.25 hours
+- **Recommendation**: Run overnight
+
+#### Parameter Details
+
+See `docs/SENSITIVITY_ANALYSIS_PARAMETERS.txt` for detailed information about:
+- Each experiment's configuration
+- Expected impact of parameter variations
+- Metrics to analyze
+- Interpretation guidelines
 
 ---
 
@@ -613,7 +755,25 @@ cd ..
 python train_and_evaluate.py
 # Choose: Visualize (y), Overlap threshold (0.5)
 
-# Results are saved in: ./output/run_YYYYMMDD_HHMMSS_5fold_overlap0.500/
+# Results are saved in: ./results/training_runs/run_YYYYMMDD_HHMMSS_5fold_overlap0.500/
+```
+
+### Sensitivity Analysis for Thesis (Chapter 4.3)
+
+```bash
+# Run automated parameter sensitivity analysis
+python scripts/run_sensitivity_analysis.py
+
+# This will:
+# 1. Run 7 experiments (one per parameter variation)
+# 2. Save individual logs to results/sensitivity/
+# 3. Generate comparison table
+# 4. Create final_results.json with all metrics
+
+# Check detailed parameter info:
+cat docs/SENSITIVITY_ANALYSIS_PARAMETERS.txt
+
+# Results saved in: results/sensitivity/
 ```
 
 ### Quick Testing with Sanity Checks
@@ -721,10 +881,10 @@ Example:
 ## Troubleshooting
 
 **Issue:** `filter_activities.py` removes too many lines
-- **Solution:** Check that your activity labels are 1-8 (not strings)
+- **Solution:** Check that your activity labels are numeric (e.g., 1, 2, 3) and not non-numeric strings
 
 **Issue:** `train_and_evaluate.py` fails to find training files
-- **Solution:** Run `filter_activities.py` first to create `data_filtered/` directory
+- **Solution:** Run `filter_activities.py` first to create `data_filtered_normal/` directory
 
 **Issue:** Evaluation shows F1=0.0
 - **Solution:** Check that predicted and ground truth files have same activity labels

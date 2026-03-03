@@ -116,9 +116,22 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
-# input and output files
-output/
+# Project-specific: data and output files
+# Data directories
 data*/
+old_datasets/
+
+# Model and results
 model/
-temp_validation/
-SanityCheck/
+results/
+analysis_results/
+
+# Output files
+*.log
+out*.txt
+temp/
+nul
+data.al
+
+# .git
+.git

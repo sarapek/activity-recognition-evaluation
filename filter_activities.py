@@ -1,64 +1,66 @@
 import os
 import re
 
-def filter_activities(input_file, output_file, keep_activities=[str(i) for i in range(1, 9)]):
+def filter_activities(input_file, output_file, keep_activities=[str(i) for i in range(1, 25)]):
     """
-    Filter data to only keep specified activities 1-8
-    
+    Filter data to keep only activities 1-24
+
     Rules:
     - Extracts activity number from annotations like '1-start', '1-end', '1.1', '1.2'
     - Labels all events between X-start and X-end as activity X
-    - Keeps only activities 1-8
-    - Maps activities 9-24 to Other_Activity
+    - Keeps ONLY activities 1-24 (removes annotation errors like 41, 1001, etc.)
+    - Removes "Other_Activity" and non-numeric annotations
     - REMOVES completely unannotated lines (no annotation at all)
     """
     current_activity = None
-    
-    with open(input_file, 'r') as f_in, open(output_file, 'w') as f_out:
+
+    with open(input_file, 'r', encoding='utf-8-sig') as f_in, open(output_file, 'w', encoding='utf-8') as f_out:
         for line in f_in:
             words = line.strip().split()
-            
-            if len(words) < 4:  # Invalid line
-                continue
-            
-            if len(words) < 5:  # No annotation - SKIP THIS LINE
-                continue
-            
-            date, time, sensor, status, annotation = words[0], words[1], words[2], words[3], words[4]
-            
-            # Extract activity number from annotations
-            # Patterns: '1-start', '1-end', '1.1', '1.2', '2-start', etc.
-            match = re.match(r'^(\d+)', annotation)
-            
-            if match:
-                activity_num = match.group(1)
-                
-                # Check if it's a start/end marker
-                if '-start' in annotation.lower():
-                    current_activity = activity_num
-                elif '-end' in annotation.lower():
-                    # Write this line, then clear current activity
-                    if activity_num in keep_activities:
-                        new_line = f"{date} {time} {sensor} {status} {activity_num}\n"
-                        f_out.write(new_line)
-                    current_activity = None
-                    continue
-                else:
-                    # It's a point annotation like '1.1' or just '1'
-                    current_activity = activity_num
-                
-                # Write the line if activity is in range 1-8
-                if current_activity and current_activity in keep_activities:
-                    new_line = f"{date} {time} {sensor} {status} {current_activity}\n"
-                    f_out.write(new_line)
-            else:
-                # Annotation exists but doesn't match our pattern
-                # Could be "Other_Activity" or something else
-                # Skip these lines for cleaner training data
+
+            if len(words) < 4:  # Invalid line (need at least date, time, sensor, status)
                 continue
 
-def filter_all_files(data_dir='./data', output_dir='./data_filtered'):
-    """Filter all data files"""
+            date, time, sensor, status = words[0], words[1], words[2], words[3]
+            annotation = words[4] if len(words) > 4 else None
+
+            # If there's an annotation, check for start/end markers
+            if annotation:
+                # Extract activity number from annotations
+                # Patterns: '1-start', '1-end', '1.1', '1.2', '2-start', etc.
+                match = re.match(r'^(\d+)', annotation)
+
+                if match:
+                    activity_num = match.group(1)
+
+                    # Check if it's a start/end marker
+                    if '-start' in annotation.lower():
+                        current_activity = activity_num if activity_num in keep_activities else None
+                        # Write the start event
+                        if current_activity:
+                            new_line = f"{date} {time} {sensor} {status} {current_activity}\n"
+                            f_out.write(new_line)
+                        continue
+                    elif '-end' in annotation.lower():
+                        # Write the end event, then clear current activity
+                        if activity_num in keep_activities and current_activity == activity_num:
+                            new_line = f"{date} {time} {sensor} {status} {activity_num}\n"
+                            f_out.write(new_line)
+                        current_activity = None
+                        continue
+                    else:
+                        # It's a point annotation like '1.1' or just '1'
+                        # This updates current activity for subsequent unlabeled events
+                        if activity_num in keep_activities:
+                            current_activity = activity_num
+
+            # Write ALL events when inside an activity segment (labeled or not)
+            if current_activity and current_activity in keep_activities:
+                new_line = f"{date} {time} {sensor} {status} {current_activity}\n"
+                f_out.write(new_line)
+
+def filter_all_files(data_dir='./data_raw_normal', output_dir='./data_filtered_normal'):
+    """Filter all data files - keeps all numbered activities"""
     os.makedirs(output_dir, exist_ok=True)
     
     stats = {
@@ -73,20 +75,20 @@ def filter_all_files(data_dir='./data', output_dir='./data_filtered'):
             output_path = os.path.join(output_dir, filename)
             
             # Count lines before
-            with open(input_path, 'r') as f:
+            with open(input_path, 'r', encoding='utf-8-sig') as f:
                 lines_in = sum(1 for _ in f)
-            
+
             filter_activities(input_path, output_path)
-            
+
             # Count lines after
-            with open(output_path, 'r') as f:
+            with open(output_path, 'r', encoding='utf-8') as f:
                 lines_out = sum(1 for _ in f)
             
             stats['total_files'] += 1
             stats['total_lines_in'] += lines_in
             stats['total_lines_out'] += lines_out
             
-            print(f"✓ {filename}: {lines_in} → {lines_out} lines")
+            print(f"[OK] {filename}: {lines_in} -> {lines_out} lines")
     
     print(f"\n{'='*60}")
     print("FILTERING SUMMARY")

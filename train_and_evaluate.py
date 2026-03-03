@@ -9,6 +9,7 @@ import numpy as np
 from collections import defaultdict
 import pandas as pd
 import matplotlib.pyplot as plt
+import argparse
 
 # Add evaluation folder to path
 sys.path.append('./evaluation')
@@ -76,13 +77,19 @@ def filter_results_by_activity(results, activity_filter):
                     'auc': roc_data.get('auc')
                 }
     
-    # Filter segment_level ROC - KEEP ONLY AUC
+    # Filter segment_level ROC - KEEP AUC AND SEGMENT METRICS
     if 'segment_level' in results:
         filtered_results['segment_level'] = {}
         for activity_id, roc_data in results['segment_level'].items():
             if activity_id in activity_filter:
                 filtered_results['segment_level'][activity_id] = {
-                    'auc': roc_data.get('auc')
+                    'auc': roc_data.get('auc'),
+                    'segment_precision': roc_data.get('segment_precision'),
+                    'segment_recall': roc_data.get('segment_recall'),
+                    'segment_f1': roc_data.get('segment_f1'),
+                    'num_gt_segments': roc_data.get('num_gt_segments'),
+                    'num_pred_segments': roc_data.get('num_pred_segments'),
+                    'num_matched_segments': roc_data.get('num_matched_segments')
                 }
     
     # Filter per_file_results if they exist
@@ -104,10 +111,18 @@ def filter_results_by_activity(results, activity_filter):
                     if activity_id in activity_filter
                 }
             
-            # Filter segment_level in per-file results - AUC ONLY
+            # Filter segment_level in per-file results - AUC AND SEGMENT METRICS
             if 'segment_level' in file_result:
                 filtered_file_result['segment_level'] = {
-                    activity_id: {'auc': roc_data.get('auc')}
+                    activity_id: {
+                        'auc': roc_data.get('auc'),
+                        'segment_precision': roc_data.get('segment_precision'),
+                        'segment_recall': roc_data.get('segment_recall'),
+                        'segment_f1': roc_data.get('segment_f1'),
+                        'num_gt_segments': roc_data.get('num_gt_segments'),
+                        'num_pred_segments': roc_data.get('num_pred_segments'),
+                        'num_matched_segments': roc_data.get('num_matched_segments')
+                    }
                     for activity_id, roc_data in file_result['segment_level'].items()
                     if activity_id in activity_filter
                 }
@@ -156,8 +171,8 @@ def count_activity_instances(file_path, evaluator, activity_ids=['1','2','3','4'
         
         if df is None or len(df) == 0:
             return {aid: 0 for aid in activity_ids}
-        
-        segments = evaluator.extract_segments(df)
+
+        segments = evaluator.extract_segments(df, confidence_threshold=0.0)  # GT: accept all
         
         counts = {aid: 0 for aid in activity_ids}
         for seg in segments:
@@ -271,12 +286,11 @@ def run_fold(fold_idx, train_files, test_files, output_dir, model_name,
     
     print("\nTraining model...")
     cmd = [
-        'python', 
-        './AL/al.py', 
-        '--mode', 'TRAIN', 
-        '--data', train_combined, 
-        '--model', model_name,
-        '--ignoreother'
+        'python',
+        './AL/al.py',
+        '--mode', 'TRAIN',
+        '--data', train_combined,
+        '--model', model_name
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, cwd='.')
     
@@ -345,7 +359,7 @@ def run_fold(fold_idx, train_files, test_files, output_dir, model_name,
     # Evaluate
     print(f"\nEvaluating fold {fold_idx + 1}...")
     multi_results = evaluator.evaluate_multiple_files(predicted_files, ground_truth_files)
-    
+
     # Visualize if requested
     if visualize:
         print(f"\n{'='*70}")
@@ -359,9 +373,9 @@ def run_fold(fold_idx, train_files, test_files, output_dir, model_name,
             try:
                 pred_df = evaluator.parse_log_file(pred_file)
                 gt_df = evaluator.parse_log_file(gt_file)
-                
-                pred_segments_raw = evaluator.extract_segments(pred_df)
-                gt_segments_raw = evaluator.extract_segments(gt_df)
+
+                pred_segments_raw = evaluator.extract_segments(pred_df, confidence_threshold=evaluator.confidence_threshold)
+                gt_segments_raw = evaluator.extract_segments(gt_df, confidence_threshold=0.0)  # GT: accept all
                 
                 def ensure_datetime_format(segments):
                     """Ensure segments have proper datetime objects"""
@@ -417,14 +431,51 @@ def print_fold_comparison(all_fold_results, activity_filter):
     micro_precision = [r['micro_avg']['precision'] for r in all_fold_results]
     micro_recall = [r['micro_avg']['recall'] for r in all_fold_results]
     micro_f1 = [r['micro_avg']['f1_score'] for r in all_fold_results]
-    
+    micro_iou = [r['micro_avg'].get('iou', 0) for r in all_fold_results]
+    micro_accuracy = [r['micro_avg'].get('accuracy', 0) for r in all_fold_results]
+
     print(f"{'Micro Precision':<20} {np.mean(micro_precision):>10.4f} {np.std(micro_precision):>10.4f} "
           f"{np.min(micro_precision):>10.4f} {np.max(micro_precision):>10.4f}")
     print(f"{'Micro Recall':<20} {np.mean(micro_recall):>10.4f} {np.std(micro_recall):>10.4f} "
           f"{np.min(micro_recall):>10.4f} {np.max(micro_recall):>10.4f}")
     print(f"{'Micro F1':<20} {np.mean(micro_f1):>10.4f} {np.std(micro_f1):>10.4f} "
           f"{np.min(micro_f1):>10.4f} {np.max(micro_f1):>10.4f}")
-    
+    print(f"{'Micro IoU':<20} {np.mean(micro_iou):>10.4f} {np.std(micro_iou):>10.4f} "
+          f"{np.min(micro_iou):>10.4f} {np.max(micro_iou):>10.4f}")
+    print(f"{'Micro Accuracy':<20} {np.mean(micro_accuracy):>10.4f} {np.std(micro_accuracy):>10.4f} "
+          f"{np.min(micro_accuracy):>10.4f} {np.max(micro_accuracy):>10.4f}")
+
+    # Macro-average AUC metrics
+    macro_frame_aucs = [r['macro_avg'].get('frame_auc') for r in all_fold_results
+                        if r['macro_avg'].get('frame_auc') is not None]
+    macro_segment_aucs = [r['macro_avg'].get('segment_auc') for r in all_fold_results
+                          if r['macro_avg'].get('segment_auc') is not None]
+
+    if macro_frame_aucs:
+        print(f"{'Macro Frame AUC':<20} {np.mean(macro_frame_aucs):>10.4f} {np.std(macro_frame_aucs):>10.4f} "
+              f"{np.min(macro_frame_aucs):>10.4f} {np.max(macro_frame_aucs):>10.4f}")
+    if macro_segment_aucs:
+        print(f"{'Macro Segment AUC':<20} {np.mean(macro_segment_aucs):>10.4f} {np.std(macro_segment_aucs):>10.4f} "
+              f"{np.min(macro_segment_aucs):>10.4f} {np.max(macro_segment_aucs):>10.4f}")
+
+    # Macro segment precision/recall/F1
+    macro_seg_precisions = [r['macro_avg'].get('segment_precision') for r in all_fold_results
+                            if r['macro_avg'].get('segment_precision') is not None]
+    macro_seg_recalls = [r['macro_avg'].get('segment_recall') for r in all_fold_results
+                         if r['macro_avg'].get('segment_recall') is not None]
+    macro_seg_f1s = [r['macro_avg'].get('segment_f1') for r in all_fold_results
+                     if r['macro_avg'].get('segment_f1') is not None]
+
+    if macro_seg_precisions:
+        print(f"{'Macro Seg Precision':<20} {np.mean(macro_seg_precisions):>10.4f} {np.std(macro_seg_precisions):>10.4f} "
+              f"{np.min(macro_seg_precisions):>10.4f} {np.max(macro_seg_precisions):>10.4f}")
+    if macro_seg_recalls:
+        print(f"{'Macro Seg Recall':<20} {np.mean(macro_seg_recalls):>10.4f} {np.std(macro_seg_recalls):>10.4f} "
+              f"{np.min(macro_seg_recalls):>10.4f} {np.max(macro_seg_recalls):>10.4f}")
+    if macro_seg_f1s:
+        print(f"{'Macro Seg F1':<20} {np.mean(macro_seg_f1s):>10.4f} {np.std(macro_seg_f1s):>10.4f} "
+              f"{np.min(macro_seg_f1s):>10.4f} {np.max(macro_seg_f1s):>10.4f}")
+
     # Per-activity metrics
     print(f"\n{'='*70}")
     print("PER-ACTIVITY METRICS ACROSS FOLDS")
@@ -432,40 +483,67 @@ def print_fold_comparison(all_fold_results, activity_filter):
     
     for activity_id in activity_filter:
         print(f"\n--- Activity {activity_id} ---")
-        
+
         precisions = []
         recalls = []
         f1s = []
+        accuracies = []
         frame_aucs = []
         seg_aucs = []
-        
+        seg_precisions = []
+        seg_recalls = []
+        seg_f1s = []
+
         for fold_result in all_fold_results:
             if activity_id in fold_result['per_class']:
                 metrics = fold_result['per_class'][activity_id]
                 precisions.append(metrics['precision'])
                 recalls.append(metrics['recall'])
                 f1s.append(metrics['f1_score'])
-            
+                if 'accuracy' in metrics:
+                    accuracies.append(metrics['accuracy'])
+
             if 'frame_level' in fold_result and activity_id in fold_result['frame_level']:
                 auc_val = fold_result['frame_level'][activity_id].get('auc')
                 if auc_val is not None:
                     frame_aucs.append(auc_val)
-            
+
             if 'segment_level' in fold_result and activity_id in fold_result['segment_level']:
-                auc_val = fold_result['segment_level'][activity_id].get('auc')
+                seg_metrics = fold_result['segment_level'][activity_id]
+                auc_val = seg_metrics.get('auc')
                 if auc_val is not None:
                     seg_aucs.append(auc_val)
-        
+                # Collect segment-level precision/recall/F1
+                if 'segment_precision' in seg_metrics:
+                    seg_precisions.append(seg_metrics['segment_precision'])
+                if 'segment_recall' in seg_metrics:
+                    seg_recalls.append(seg_metrics['segment_recall'])
+                if 'segment_f1' in seg_metrics:
+                    seg_f1s.append(seg_metrics['segment_f1'])
+
+        # Display frame-level metrics (based on duration)
+        print(f"  Frame-Level Metrics (duration-based):")
         if precisions:
-            print(f"  Precision:     {np.mean(precisions):.4f} ± {np.std(precisions):.4f}")
-            print(f"  Recall:        {np.mean(recalls):.4f} ± {np.std(recalls):.4f}")
-            print(f"  F1 Score:      {np.mean(f1s):.4f} ± {np.std(f1s):.4f}")
-        
+            print(f"    Precision:   {np.mean(precisions):.4f} ± {np.std(precisions):.4f}")
+            print(f"    Recall:      {np.mean(recalls):.4f} ± {np.std(recalls):.4f}")
+            print(f"    F1 Score:    {np.mean(f1s):.4f} ± {np.std(f1s):.4f}")
+
+        if accuracies:
+            print(f"    Accuracy:    {np.mean(accuracies):.4f} ± {np.std(accuracies):.4f}")
+
         if frame_aucs:
-            print(f"  Frame AUC:     {np.mean(frame_aucs):.4f} ± {np.std(frame_aucs):.4f}")
-        
+            print(f"    Frame AUC:   {np.mean(frame_aucs):.4f} ± {np.std(frame_aucs):.4f}")
+
+        # Display segment-level metrics (based on segment counts)
+        print(f"  Segment-Level Metrics (count-based):")
+        if seg_precisions:
+            print(f"    Precision:   {np.mean(seg_precisions):.4f} ± {np.std(seg_precisions):.4f}")
+        if seg_recalls:
+            print(f"    Recall:      {np.mean(seg_recalls):.4f} ± {np.std(seg_recalls):.4f}")
+        if seg_f1s:
+            print(f"    F1 Score:    {np.mean(seg_f1s):.4f} ± {np.std(seg_f1s):.4f}")
         if seg_aucs:
-            print(f"  Segment AUC:   {np.mean(seg_aucs):.4f} ± {np.std(seg_aucs):.4f}")
+            print(f"    Segment AUC: {np.mean(seg_aucs):.4f} ± {np.std(seg_aucs):.4f}")
     
     print(f"{'='*70}\n")
 
@@ -485,26 +563,35 @@ def create_aggregated_summary(all_fold_results, activity_filter):
             'TP_duration': [],
             'FP_duration': [],
             'FN_duration': [],
+            'TN_duration': [],
             'precision': [],
             'recall': [],
             'f1_score': [],
             'iou': [],
+            'accuracy': [],
             'gt_total_duration': [],
             'pred_total_duration': [],
             'frame_auc': [],
-            'segment_auc': []
+            'segment_auc': [],
+            'segment_precision': [],
+            'segment_recall': [],
+            'segment_f1': []
         }
-        
+
         for fold_result in all_fold_results:
             if activity_id in fold_result.get('per_class', {}):
                 metrics = fold_result['per_class'][activity_id]
                 class_metrics['TP_duration'].append(metrics['TP_duration'])
                 class_metrics['FP_duration'].append(metrics['FP_duration'])
                 class_metrics['FN_duration'].append(metrics['FN_duration'])
+                if 'TN_duration' in metrics:
+                    class_metrics['TN_duration'].append(metrics['TN_duration'])
                 class_metrics['precision'].append(metrics['precision'])
                 class_metrics['recall'].append(metrics['recall'])
                 class_metrics['f1_score'].append(metrics['f1_score'])
                 class_metrics['iou'].append(metrics['iou'])
+                if 'accuracy' in metrics:
+                    class_metrics['accuracy'].append(metrics['accuracy'])
                 class_metrics['gt_total_duration'].append(metrics['gt_total_duration'])
                 class_metrics['pred_total_duration'].append(metrics['pred_total_duration'])
             
@@ -514,9 +601,17 @@ def create_aggregated_summary(all_fold_results, activity_filter):
                     class_metrics['frame_auc'].append(auc_val)
             
             if 'segment_level' in fold_result and activity_id in fold_result['segment_level']:
-                auc_val = fold_result['segment_level'][activity_id].get('auc')
+                seg_metrics = fold_result['segment_level'][activity_id]
+                auc_val = seg_metrics.get('auc')
                 if auc_val is not None:
                     class_metrics['segment_auc'].append(auc_val)
+                # Collect segment-level precision/recall/F1
+                if 'segment_precision' in seg_metrics:
+                    class_metrics['segment_precision'].append(seg_metrics['segment_precision'])
+                if 'segment_recall' in seg_metrics:
+                    class_metrics['segment_recall'].append(seg_metrics['segment_recall'])
+                if 'segment_f1' in seg_metrics:
+                    class_metrics['segment_f1'].append(seg_metrics['segment_f1'])
         
         # Calculate mean ± std for each metric
         summary['per_class'][activity_id] = {}
@@ -536,27 +631,52 @@ def create_aggregated_summary(all_fold_results, activity_filter):
         agg_metrics = {
             'precision': [],
             'recall': [],
-            'f1_score': []
+            'f1_score': [],
+            'iou': []
         }
-        
+
         if avg_type == 'micro_avg':
+            agg_metrics['accuracy'] = []
             agg_metrics['total_TP_duration'] = []
             agg_metrics['total_FP_duration'] = []
             agg_metrics['total_FN_duration'] = []
-        
+
+        if avg_type in ['macro_avg', 'weighted_avg']:
+            agg_metrics['frame_auc'] = []
+            agg_metrics['segment_auc'] = []
+            agg_metrics['segment_precision'] = []
+            agg_metrics['segment_recall'] = []
+            agg_metrics['segment_f1'] = []
+
         for fold_result in all_fold_results:
             if avg_type in fold_result:
                 agg_metrics['precision'].append(fold_result[avg_type].get('precision', 0))
                 agg_metrics['recall'].append(fold_result[avg_type].get('recall', 0))
                 agg_metrics['f1_score'].append(fold_result[avg_type].get('f1_score', 0))
-                
+                if 'iou' in fold_result[avg_type]:
+                    agg_metrics['iou'].append(fold_result[avg_type].get('iou', 0))
+
                 if avg_type == 'micro_avg':
+                    agg_metrics['accuracy'].append(
+                        fold_result[avg_type].get('accuracy', 0))
                     agg_metrics['total_TP_duration'].append(
                         fold_result[avg_type].get('total_TP_duration', 0))
                     agg_metrics['total_FP_duration'].append(
                         fold_result[avg_type].get('total_FP_duration', 0))
                     agg_metrics['total_FN_duration'].append(
                         fold_result[avg_type].get('total_FN_duration', 0))
+
+                if avg_type in ['macro_avg', 'weighted_avg']:
+                    if fold_result[avg_type].get('frame_auc') is not None:
+                        agg_metrics['frame_auc'].append(fold_result[avg_type].get('frame_auc'))
+                    if fold_result[avg_type].get('segment_auc') is not None:
+                        agg_metrics['segment_auc'].append(fold_result[avg_type].get('segment_auc'))
+                    if fold_result[avg_type].get('segment_precision') is not None:
+                        agg_metrics['segment_precision'].append(fold_result[avg_type].get('segment_precision'))
+                    if fold_result[avg_type].get('segment_recall') is not None:
+                        agg_metrics['segment_recall'].append(fold_result[avg_type].get('segment_recall'))
+                    if fold_result[avg_type].get('segment_f1') is not None:
+                        agg_metrics['segment_f1'].append(fold_result[avg_type].get('segment_f1'))
         
         summary['aggregate'][avg_type] = {}
         for metric, values in agg_metrics.items():
@@ -571,52 +691,44 @@ def create_aggregated_summary(all_fold_results, activity_filter):
     return summary
 
 
-def run_cross_validation(files, unfiltered_dir, output_dir, model_name_base,
+def run_cross_validation(files, output_dir, model_name_base,
                         evaluator, n_folds=5, visualize=False):
     """Run k-fold cross-validation"""
-    
+
     activity_filter = ['1', '2', '3', '4', '5', '6', '7', '8']
-    
+
     # Create stratified folds
     folds, file_activity_counts = create_stratified_folds(
         files, evaluator, n_folds=n_folds, activity_ids=activity_filter
     )
-    
+
     # Run each fold
     all_fold_results = []
-    
+
     for fold_idx in range(n_folds):
         # Create train/test split
-        test_file_paths_filtered = folds[fold_idx]
-        train_file_paths_filtered = []
+        test_file_paths = folds[fold_idx]
+        train_file_paths = []
         for i in range(n_folds):
             if i != fold_idx:
-                train_file_paths_filtered.extend(folds[i])
-        
-        # Get matching UNFILTERED test files
-        test_file_paths_unfiltered = []
-        for filtered_path in test_file_paths_filtered:
-            basename = os.path.basename(filtered_path)
-            unfiltered_path = os.path.join(unfiltered_dir, basename)
-            if os.path.exists(unfiltered_path):
-                test_file_paths_unfiltered.append(unfiltered_path)
-        
+                train_file_paths.extend(folds[i])
+
         print(f"\n{'='*70}")
         print(f"FOLD {fold_idx + 1}/{n_folds}")
         print(f"{'='*70}")
-        print(f"Training: {len(train_file_paths_filtered)} files (filtered)")
-        print(f"Testing: {len(test_file_paths_unfiltered)} files (unfiltered)")
-        
+        print(f"Training: {len(train_file_paths)} files")
+        print(f"Testing: {len(test_file_paths)} files")
+
         # Create fold-specific output directory
         fold_output_dir = os.path.join(output_dir, f'fold_{fold_idx + 1}')
         os.makedirs(fold_output_dir, exist_ok=True)
-        
+
         # Run fold
         model_name = f"{model_name_base}_fold{fold_idx}"
         fold_results = run_fold(
-            fold_idx, 
-            train_file_paths_filtered,
-            test_file_paths_unfiltered,
+            fold_idx,
+            train_file_paths,
+            test_file_paths,
             fold_output_dir,
             model_name,
             evaluator,
@@ -700,54 +812,62 @@ def run_cross_validation(files, unfiltered_dir, output_dir, model_name_base,
 
 def main():
     """Main entry point"""
-    
+
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Train and evaluate activity recognition with cross-validation')
+    parser.add_argument('--overlap-threshold', type=float, default=0.5,
+                        help='Segment overlap threshold for matching (default: 0.5)')
+    parser.add_argument('--start-time-threshold', type=float, default=30.0,
+                        help='Start time tolerance in seconds (default: 30.0)')
+    parser.add_argument('--max-gap-seconds', type=float, default=60.0,
+                        help='Maximum gap within segment before splitting (default: 60.0)')
+    parser.add_argument('--confidence-threshold', type=float, default=0.5,
+                        help='Minimum confidence for predictions (default: 0.5)')
+    parser.add_argument('--num-folds', type=int, default=5,
+                        help='Number of cross-validation folds (default: 5)')
+    args = parser.parse_args()
+
     # Configuration
     random.seed(42)
-    
-    filtered_data_dir = './data_filtered'
-    unfiltered_data_dir = './data_spaces'
+
+    data_dir = './data_filtered_normal'  # 251 curated files, activities 1-8 only
     model_name_base = 'cv_model'
-    n_folds = 5
-    
-    # Evaluator configuration
+    n_folds = args.num_folds
+
+    # Evaluator configuration (from command line args)
     timeline_resolution = 1.0  # seconds
-    start_time_threshold = 0   # seconds
-    overlap_threshold = 0.5    # segment overlap threshold
-    
-    
-    # Get all filtered files
-    all_filtered_files = [
-        os.path.join(filtered_data_dir, f) 
-        for f in os.listdir(filtered_data_dir) 
+    start_time_threshold = args.start_time_threshold
+    overlap_threshold = args.overlap_threshold
+    confidence_threshold = args.confidence_threshold
+    max_gap_seconds = args.max_gap_seconds
+
+
+    # Get all files from the filtered directory
+    all_files = [
+        os.path.join(data_dir, f)
+        for f in os.listdir(data_dir)
         if f.endswith('.txt')
     ]
-    
-    # Only keep files that have matches in BOTH directories
-    filtered_files = []
-    for filtered_file in all_filtered_files:
-        basename = os.path.basename(filtered_file)
-        unfiltered_file = os.path.join(unfiltered_data_dir, basename)
-        if os.path.exists(unfiltered_file):
-            filtered_files.append(filtered_file)
-    
-    if len(filtered_files) == 0:
-        print(f"\nERROR: No matching file pairs found!")
-        print(f"Filtered dir: {filtered_data_dir}")
-        print(f"Unfiltered dir: {unfiltered_data_dir}")
+
+    if len(all_files) == 0:
+        print(f"\nERROR: No files found in {data_dir}!")
         return
-    
-    print(f"\n[OK] Using {len(filtered_files)} matched file pairs for cross-validation")
-    
-    # Ask about visualization
-    visualize = input("Enable timeline visualization? (y/n): ").lower().strip() == 'y'
-    
-    # Ask about overlap threshold
-    overlap_threshold = float(input("Overlap threshold (0.0-1.0): ").strip())
+
+    print(f"\n[OK] Using {len(all_files)} files for cross-validation")
+
+    # Display configuration from command line args
+    print(f"  Start time tolerance: {start_time_threshold}s")
+    print(f"  Overlap threshold:    {overlap_threshold}")
+    print(f"  Confidence threshold: {confidence_threshold}")
+    print(f"  Max gap (split):      {max_gap_seconds}s")
+
+    # Enable visualization for faster sensitivity analysis
+    visualize = True
     
     # Create output directory
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     run_name = f'run_{timestamp}_{n_folds}fold_overlap{overlap_threshold:.3f}'
-    output_dir = os.path.join('./output', run_name)
+    output_dir = os.path.join('./results/training_runs', run_name)
     os.makedirs(output_dir, exist_ok=True)
 
     # Save run configuration
@@ -759,48 +879,53 @@ def main():
             'timeline_resolution_seconds': timeline_resolution,
             'start_time_threshold_seconds': start_time_threshold,
             'overlap_threshold': overlap_threshold,
-            'filtered_data_dir': filtered_data_dir,
-            'unfiltered_data_dir': unfiltered_data_dir,
-            'num_files': len(filtered_files)
+            'confidence_threshold': confidence_threshold,
+            'max_gap_seconds': max_gap_seconds,
+            'data_dir': data_dir,
+            'num_files': len(all_files)
         }, f, indent=2)
 
     print(f"Output directory: {output_dir}")
     print(f"Configuration saved: {config_path}")
-    
+
     # Create evaluator
     evaluator = SegmentEvaluator(
         timeline_resolution_seconds=timeline_resolution,
         start_time_threshold_seconds=start_time_threshold,
-        overlap_threshold=overlap_threshold
+        overlap_threshold=overlap_threshold,
+        confidence_threshold=confidence_threshold,
+        max_gap_seconds=max_gap_seconds
     )
-    
+
     # Run cross-validation
     print(f"\n{'='*70}")
     print("STARTING CROSS-VALIDATION")
     print(f"{'='*70}")
-    print(f"Files: {len(filtered_files)}")
+    print(f"Files: {len(all_files)}")
     print(f"Folds: {n_folds}")
     print(f"Timeline resolution: {timeline_resolution}s")
+    print(f"Start time tolerance: {start_time_threshold}s")
     print(f"Overlap threshold: {overlap_threshold}")
+    print(f"Confidence threshold: {confidence_threshold}")
+    print(f"Max gap (split): {max_gap_seconds}s")
     print(f"{'='*70}\n")
-    
+
     all_fold_results = run_cross_validation(
-        filtered_files,
-        unfiltered_data_dir,
+        all_files,
         output_dir,
         model_name_base,
         evaluator,
         n_folds=n_folds,
         visualize=visualize
     )
-    
+
     if all_fold_results:
         print('\a')  # Beep
         print("\n" + "="*70)
         print("CROSS-VALIDATION COMPLETE!")
         print("="*70)
         print(f"\nAll outputs saved to: {output_dir}")
-        print(f"Total files used: {len(filtered_files)}")
+        print(f"Total files used: {len(all_files)}")
     else:
         print("\nCross-validation completed with errors.")
 

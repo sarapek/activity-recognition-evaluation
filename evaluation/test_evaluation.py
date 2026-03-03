@@ -5,7 +5,7 @@ Test script for evaluating all sanity check variants against the original file
 from statistics import variance
 from segment_evaluator import SegmentEvaluator
 from visualize_segments_timeline import visualize_segments_timeline
-from modify_file import SanityCheckModifier
+from test_scripts.modify_file import SanityCheckModifier
 import os
 import json
 from datetime import datetime
@@ -28,26 +28,34 @@ def convert_to_json_serializable(obj):
     else:
         return str(obj)
 
-def run_single_test(evaluator, predicted_file, ground_truth_file, variant_name, 
+def run_single_test(evaluator, predicted_file, ground_truth_file, variant_name,
                     output_file=None, timeline_visualisation=False, show_roc=False,
-                    activity_filter=None):
+                    activity_filter=None, output_dir=None):
     """Run evaluation on a single variant"""
     header = f"\n{'='*70}\nTesting: {variant_name.upper()}\n{'='*70}\n"
-    
+
     print(header)
     if output_file:
         output_file.write(header)
-    
+
     try:
         # Use evaluate_with_dual_roc to get ROC curves
         if show_roc:
-            results = evaluator.evaluate_with_dual_roc(predicted_file, ground_truth_file, aggregation='average')
-            
+            results = evaluator.evaluate_with_dual_roc(
+                predicted_file,
+                ground_truth_file,
+                aggregation='average',
+                activity_filter=activity_filter
+            )
+
             # Plot ROC curves
             try:
+                roc_path = f"roc_{variant_name}.png"
+                if output_dir:
+                    roc_path = os.path.join(output_dir, roc_path)
                 evaluator.plot_dual_roc_curves(
-                    results, 
-                    save_path=f"roc_{variant_name}.png"
+                    results,
+                    save_path=roc_path
                 )
             except Exception as plot_err:
                 print(f"Could not plot ROC curves: {plot_err}")
@@ -229,24 +237,31 @@ def write_report_to_file(results, file_handle):
     
     file_handle.write("=" * 60 + "\n\n")
 
-def run_all_sanity_tests(ground_truth_file, sanity_check_dir="./SanityCheck", 
-                        timeline_visualisation=False, start_time_threshold_seconds=2.0,
+def run_all_sanity_tests(ground_truth_file, sanity_check_dir="../results/sanity_checks",
+                        timeline_visualisation=False, start_time_threshold_seconds=30,
                         show_roc=False, activity_filter=None):
     """Run evaluation on all sanity check variants and generate summary report"""
-    
+
+    # Create timestamped output directory
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    output_dir = os.path.join("../results/training_runs", f"sanity_test_{timestamp}")
+    os.makedirs(output_dir, exist_ok=True)
+
+    print(f"\nOutput directory: {output_dir}")
+
     evaluator = SegmentEvaluator(timeline_resolution_seconds=5,start_time_threshold_seconds=start_time_threshold_seconds)
-    
+
     variants = [
         'perfect',
         'small_time_shift',
-        'large_time_shift', 
+        'large_time_shift',
         'boundary_errors',
         'missing_segments',
         'false_positives',
         'label_confusion',
         'combined_errors'
     ]
-    
+
     base_name = os.path.splitext(os.path.basename(ground_truth_file))[0]
     all_results = {}
     
@@ -263,13 +278,14 @@ def run_all_sanity_tests(ground_truth_file, sanity_check_dir="./SanityCheck",
             continue
         
         results = run_single_test(
-            evaluator, 
-            predicted_file, 
-            ground_truth_file, 
-            variant, 
+            evaluator,
+            predicted_file,
+            ground_truth_file,
+            variant,
             timeline_visualisation=timeline_visualisation,
             show_roc=show_roc,
-            activity_filter=activity_filter
+            activity_filter=activity_filter,
+            output_dir=output_dir
         )
         
         if results:
@@ -289,9 +305,14 @@ def run_all_sanity_tests(ground_truth_file, sanity_check_dir="./SanityCheck",
     
     for variant_name in variants:
         pred_file = os.path.join(sanity_check_dir, f'P001_{variant_name}.txt')
-        
+
         print(f"\nEvaluating {variant_name}...")
-        results = evaluator.evaluate_with_dual_roc(pred_file, ground_truth_file, aggregation='average')
+        results = evaluator.evaluate_with_dual_roc(
+            pred_file,
+            ground_truth_file,
+            aggregation='average',
+            activity_filter=activity_filter
+        )
         
         # ADD DEBUG HERE FOR PERFECT VARIANT
         if variant_name == 'perfect':
@@ -339,61 +360,148 @@ def run_all_sanity_tests(ground_truth_file, sanity_check_dir="./SanityCheck",
         
         print(f"{variant:<20} {f1:>8.4f} {precision:>10.4f} {recall:>8.4f} {frame_auc_str:>10} {seg_auc_str:>10}")
     
-    # Save results to JSON
-    output_file = os.path.join(sanity_check_dir, "evaluation_results.json")    
-    with open(output_file, 'w') as f:
-        json.dump({
-            'test_date': datetime.now().isoformat(),
-            'ground_truth_file': ground_truth_file,
-            'activity_filter': activity_filter,
-            'results': convert_to_json_serializable(all_results)
-        }, f, indent=2)
+    # Save summary report to text file
+    report_path = os.path.join(output_dir, "evaluation_summary.txt")
+    with open(report_path, 'w') as f:
+        f.write("="*70 + "\n")
+        f.write("SANITY CHECK EVALUATION SUMMARY\n")
+        f.write("="*70 + "\n")
+        f.write(f"Test Date: {datetime.now().isoformat()}\n")
+        f.write(f"Ground Truth: {ground_truth_file}\n")
+        if activity_filter:
+            f.write(f"Activity Filter: {', '.join(activity_filter)}\n")
+        f.write("="*70 + "\n\n")
 
-    print(f"\nDetailed results saved to: {output_file}")
+        f.write(f"{'Variant':<20} {'F1':>8} {'Precision':>10} {'Recall':>8} {'Frame AUC':>10} {'Seg AUC':>10}\n")
+        f.write("-"*80 + "\n")
+
+        for variant in variants:
+            if variant in all_results:
+                results = all_results[variant]
+                micro = results.get('micro_avg', {})
+                f1 = micro.get('f1_score', 0)
+                precision = micro.get('precision', 0)
+                recall = micro.get('recall', 0)
+
+                # Get average AUC from frame_level if available
+                frame_auc_str = "N/A"
+                if 'frame_level' in results:
+                    if activity_filter:
+                        aucs = [v.get('auc') for k, v in results['frame_level'].items()
+                               if k in activity_filter and v.get('auc') is not None]
+                    else:
+                        aucs = [v.get('auc') for v in results['frame_level'].values()
+                               if v.get('auc') is not None]
+                    if aucs:
+                        frame_auc_str = f"{np.mean(aucs):.3f}"
+
+                # Get average AUC from segment_level if available
+                seg_auc_str = "N/A"
+                if 'segment_level' in results:
+                    if activity_filter:
+                        aucs = [v.get('auc') for k, v in results['segment_level'].items()
+                               if k in activity_filter and v.get('auc') is not None]
+                    else:
+                        aucs = [v.get('auc') for v in results['segment_level'].values()
+                               if v.get('auc') is not None]
+                    if aucs:
+                        seg_auc_str = f"{np.mean(aucs):.3f}"
+
+                f.write(f"{variant:<20} {f1:>8.4f} {precision:>10.4f} {recall:>8.4f} {frame_auc_str:>10} {seg_auc_str:>10}\n")
+
+    print(f"\nSummary report saved to: {report_path}")
+    print(f"All outputs saved to: {output_dir}")
     
     return all_results
 
-def test_with_confidence_scores(ground_truth_file, predicted_file, confidence_scores, start_time_threshold_seconds=2.0):
+def test_with_confidence_scores(ground_truth_file, predicted_file, confidence_scores, start_time_threshold_seconds=30):
     """
     Test evaluation with confidence scores (for SVM predictions)
-    
+
     Args:
         ground_truth_file: Path to ground truth
         predicted_file: Path to predictions
         confidence_scores: List of confidence values for each predicted segment
     """
+    # Create timestamped output directory
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    output_dir = os.path.join("../results/training_runs", f"confidence_test_{timestamp}")
+    os.makedirs(output_dir, exist_ok=True)
+
     print("\n" + "="*70)
     print("TESTING WITH CONFIDENCE SCORES (SVM Mode)")
     print("="*70)
-    
+    print(f"\nOutput directory: {output_dir}")
+
     evaluator = SegmentEvaluator(timeline_resolution_seconds=30.0,start_time_threshold_seconds=start_time_threshold_seconds)
-    
+
     results = evaluator.evaluate(
         predicted_file,
         ground_truth_file,
         confidence_scores=confidence_scores
     )
-    
+
     evaluator.print_report(results)
-    
+
     print(f"\nConfidence scores used: {confidence_scores}")
     auc_val = results['auc']
     if auc_val is not None:
         print(f"AUC with confidence: {auc_val:.4f}")
     else:
         print(f"AUC: N/A (not enough varied scores)")
-    
+
+    # Save summary report to text file
+    report_path = os.path.join(output_dir, "confidence_test_summary.txt")
+    with open(report_path, 'w') as f:
+        f.write("="*70 + "\n")
+        f.write("CONFIDENCE SCORE TEST SUMMARY\n")
+        f.write("="*70 + "\n")
+        f.write(f"Test Date: {datetime.now().isoformat()}\n")
+        f.write(f"Ground Truth: {ground_truth_file}\n")
+        f.write(f"Predicted File: {predicted_file}\n")
+        f.write(f"Confidence Scores: {confidence_scores}\n")
+        f.write("="*70 + "\n\n")
+
+        micro = results.get('micro_avg', {})
+        f.write("Metrics:\n")
+        f.write(f"  F1 Score:  {micro.get('f1_score', 0):.4f}\n")
+        f.write(f"  Precision: {micro.get('precision', 0):.4f}\n")
+        f.write(f"  Recall:    {micro.get('recall', 0):.4f}\n")
+        if 'accuracy' in micro:
+            f.write(f"  Accuracy:  {micro.get('accuracy', 0):.4f}\n")
+        auc_val = results.get('auc')
+        if auc_val is not None:
+            f.write(f"  AUC:       {auc_val:.4f}\n")
+        else:
+            f.write(f"  AUC:       N/A\n")
+
+    print(f"\nSummary report saved to: {report_path}")
+    print(f"All outputs saved to: {output_dir}")
+
     return results
 
-def quick_test(ground_truth_file, predicted_file, start_time_threshold_seconds=2.0, 
+def quick_test(ground_truth_file, predicted_file, start_time_threshold_seconds=30,
                show_roc=False, activity_filter=None):
     """Quick single-file test"""
+    # Create timestamped output directory
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    output_dir = os.path.join("../results/training_runs", f"quick_test_{timestamp}")
+    os.makedirs(output_dir, exist_ok=True)
+
+    print(f"\nOutput directory: {output_dir}")
+
     evaluator = SegmentEvaluator(timeline_resolution_seconds=30,start_time_threshold_seconds=start_time_threshold_seconds)
-    
+
     if show_roc:
-        results = evaluator.evaluate_with_dual_roc(predicted_file, ground_truth_file, aggregation='average')
+        results = evaluator.evaluate_with_dual_roc(
+            predicted_file,
+            ground_truth_file,
+            aggregation='average',
+            activity_filter=activity_filter
+        )
         try:
-            evaluator.plot_dual_roc_curves(results, save_path='roc_quick_test.png', activity_filter=['1', '2', '3', '4', '5', '6', '7', '8'])
+            roc_path = os.path.join(output_dir, 'roc_quick_test.png')
+            evaluator.plot_dual_roc_curves(results, save_path=roc_path, activity_filter=activity_filter)
         except Exception as e:
             print(f"Could not plot ROC curves: {e}")
     else:
@@ -438,15 +546,73 @@ def quick_test(ground_truth_file, predicted_file, start_time_threshold_seconds=2
     print(f"  GT frames: {activity_1_gt_frames}")
     print(f"  Pred frames: {activity_1_pred_frames}")
     print(f"  Pred frames with conf>0: {activity_1_conf_frames}")
-    
+
     evaluator.print_report(results, activity_filter=activity_filter)
+
+    # Save summary report to text file
+    report_path = os.path.join(output_dir, "quick_test_summary.txt")
+    with open(report_path, 'w') as f:
+        f.write("="*70 + "\n")
+        f.write("QUICK TEST SUMMARY\n")
+        f.write("="*70 + "\n")
+        f.write(f"Test Date: {datetime.now().isoformat()}\n")
+        f.write(f"Ground Truth: {ground_truth_file}\n")
+        f.write(f"Predicted File: {predicted_file}\n")
+        if activity_filter:
+            f.write(f"Activity Filter: {', '.join(activity_filter)}\n")
+        f.write("="*70 + "\n\n")
+
+        # Aggregate metrics
+        if 'macro_avg' in results:
+            f.write("Macro-Average:\n")
+            f.write(f"  Precision: {results['macro_avg']['precision']:.4f}\n")
+            f.write(f"  Recall:    {results['macro_avg']['recall']:.4f}\n")
+            f.write(f"  F1 Score:  {results['macro_avg']['f1_score']:.4f}\n\n")
+
+        if 'micro_avg' in results:
+            f.write("Micro-Average:\n")
+            f.write(f"  Precision: {results['micro_avg']['precision']:.4f}\n")
+            f.write(f"  Recall:    {results['micro_avg']['recall']:.4f}\n")
+            f.write(f"  F1 Score:  {results['micro_avg']['f1_score']:.4f}\n")
+            if 'accuracy' in results['micro_avg']:
+                f.write(f"  Accuracy:  {results['micro_avg']['accuracy']:.4f}\n")
+
+        # Per-class metrics summary
+        if 'per_class' in results:
+            f.write("\n" + "="*70 + "\n")
+            f.write("PER-CLASS SUMMARY\n")
+            f.write("="*70 + "\n")
+            activities = sorted(results['per_class'].keys())
+            if activity_filter:
+                activities = [a for a in activities if a in activity_filter]
+
+            for activity_id in activities:
+                metrics = results['per_class'][activity_id]
+                f.write(f"\nActivity {activity_id}:\n")
+                f.write(f"  Precision: {metrics['precision']:.4f}\n")
+                f.write(f"  Recall:    {metrics['recall']:.4f}\n")
+                f.write(f"  F1 Score:  {metrics['f1_score']:.4f}\n")
+
+                if 'frame_level' in results and activity_id in results['frame_level']:
+                    auc_val = results['frame_level'][activity_id].get('auc')
+                    if auc_val is not None:
+                        f.write(f"  Frame AUC: {auc_val:.4f}\n")
+
+                if 'segment_level' in results and activity_id in results['segment_level']:
+                    auc_val = results['segment_level'][activity_id].get('auc')
+                    if auc_val is not None:
+                        f.write(f"  Seg AUC:   {auc_val:.4f}\n")
+
+    print(f"\nSummary report saved to: {report_path}")
+    print(f"All outputs saved to: {output_dir}")
+
     return results
 
 if __name__ == "__main__":
     
     # Configuration
     GROUND_TRUTH_FILE = "../data/P001.txt"
-    SANITY_CHECK_DIR = "../SanityCheck"
+    SANITY_CHECK_DIR = "../results/sanity_checks"
     
     # Define activity filter (only show activities 1-8)
     ACTIVITY_FILTER = ['1', '2', '3', '4', '5', '6', '7', '8']
@@ -467,8 +633,14 @@ if __name__ == "__main__":
     
     show_roc = input("\nGenerate ROC curves? (y/n): ").lower().strip() == 'y'
         
-    # Option 3: Ask about time tolerance
-    #start_time_threshold_seconds = int(input("\nStart and end time tolerance in seconds: ").strip())
+    # Ask about evaluation settings - offer defaults first
+    use_defaults = input("\nUse default evaluation settings? (y/n): ").lower().strip() == 'y'
+
+    if use_defaults:
+        start_time_threshold_seconds = 30.0
+        print(f"  Start time tolerance: {start_time_threshold_seconds}s")
+    else:
+        start_time_threshold_seconds = float(input("  Start time tolerance in seconds (default 30): ").strip() or '30')
     
     # Option 4: Run full test suite
     print("\n" + "="*70)
@@ -486,7 +658,7 @@ if __name__ == "__main__":
             GROUND_TRUTH_FILE, 
             SANITY_CHECK_DIR, 
             timeline_visualisation=timeline_visualisation_enabled,
-            #start_time_threshold_seconds=start_time_threshold_seconds,
+            start_time_threshold_seconds=start_time_threshold_seconds,
             show_roc=show_roc,
             activity_filter=ACTIVITY_FILTER
         )
@@ -496,8 +668,8 @@ if __name__ == "__main__":
         predicted = input("Enter predicted file path: ").strip()
         quick_test(
             GROUND_TRUTH_FILE, 
-            predicted, 
-            #start_time_threshold_seconds=start_time_threshold_seconds,
+            predicted,
+            start_time_threshold_seconds=start_time_threshold_seconds,
             show_roc=show_roc,
             activity_filter=ACTIVITY_FILTER
         )
@@ -510,8 +682,8 @@ if __name__ == "__main__":
         test_with_confidence_scores(
             GROUND_TRUTH_FILE, 
             predicted, 
-            confidence_scores, 
-            #start_time_threshold_seconds=start_time_threshold_seconds
+            confidence_scores,
+            start_time_threshold_seconds=start_time_threshold_seconds
         )
     
     else:
