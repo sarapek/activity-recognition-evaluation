@@ -18,9 +18,9 @@ In other words, this project does not develop or modify AL itself; instead, it p
 
 This system consists of three main components:
 
-1. **Data Filtering** (`filter_activities.py`) - Prepares raw sensor data for training
-2. **Activity Learning** (`al.py`) - Trains and tests activity recognition models (see `AL/README.md` for details)
-3. **Evaluation Suite** - Validates model performance with comprehensive metrics
+1. **Data Filtering** (`scripts/filter_activities.py`) - Prepares raw sensor data for training
+2. **Activity Learning** (`AL/al.py`) - Trains and tests activity recognition models (see `AL/README.md` for details)
+3. **Evaluation Suite** (`evaluation/`) - Validates model performance with comprehensive metrics
 
 ---
 
@@ -43,7 +43,6 @@ Tested versions:
 project/
 ├── README.md
 ├── train_and_evaluate.py       # Main training & evaluation pipeline
-├── filter_activities.py        # Data preprocessing
 │
 ├── data_filtered_normal/       # Active: Filtered training data
 ├── data_raw_normal/            # Active: Raw sensor data
@@ -57,17 +56,20 @@ project/
 │   ├── segment_evaluator.py   # Core evaluation engine
 │   ├── test_evaluation.py     # Main testing interface
 │   ├── visualize_segments_timeline.py  # Timeline visualization
-│   ├── analyze_current_dataset.py      # Dataset analysis
 │   └── test_scripts/          # Test utilities
 │       ├── modify_file.py
 │       ├── run_sanity_check.py
+│       ├── test_slovene_plots.py
 │       ├── generate_bad_roc_test_files.py
 │       ├── test_bad_roc_files.py
 │       ├── test_metrics_comprehensive.py
 │       └── test_roc_auc_validation.py
 │
-├── scripts/                    # Additional scripts
-│   └── run_sensitivity_analysis.py  # Parameter sensitivity analysis
+├── scripts/                    # Data processing and analysis scripts
+│   ├── filter_activities.py           # Data preprocessing
+│   ├── analyze_current_dataset.py     # Dataset statistics
+│   ├── count_sensors_by_type.py       # Sensor inventory
+│   └── run_sensitivity_analysis.py    # Parameter sensitivity analysis
 │
 ├── docs/                       # Documentation
 │   └── SENSITIVITY_ANALYSIS_PARAMETERS.txt
@@ -97,20 +99,22 @@ project/
 
 ## Data Preparation
 
-### Filter Activities with `filter_activities.py`
+### Filter Activities with `scripts/filter_activities.py`
 
 The filter script processes raw sensor data to extract all numbered activities, making the data suitable for use with `al.py`.
 
 **What it does:**
-- Keeps ALL numbered activities (1, 2, 3, ... 24, 27, etc.)
+- Keeps ALL numbered activities (1-24 by default)
 - Removes "Other_Activity" and unlabeled sensor events
+- Filters out battery sensors (BATP*, BATV*), wearable sensors (SS*), and problematic sensors
+- Removes lines with error annotations
 - Handles both start/end markers and point annotations
 - Creates cleaned training data in `data_filtered_normal/` directory
 
 **Usage:**
 
 ```bash
-python filter_activities.py
+python scripts/filter_activities.py
 ```
 
 **Input format** (raw data):
@@ -133,6 +137,73 @@ python filter_activities.py
 - Lines without annotations or with "Other_Activity" are removed
 - This creates cleaner training data for the AL model
 - This approach allows the model to learn all activities while evaluation focuses on specific activities of interest
+
+---
+
+## Dataset Analysis Scripts
+
+### Sensor Inventory (`scripts/count_sensors_by_type.py`)
+
+Analyzes the filtered dataset to count and categorize all unique sensors by type.
+
+**Usage:**
+```bash
+python scripts/count_sensors_by_type.py
+```
+
+**Output:**
+- Lists all unique sensor IDs found in `data_filtered_normal/`
+- Groups sensors by prefix (D, E, I, L, LL, LS, M, MA, P, T)
+- Displays total count per sensor type
+- Helps verify sensor configuration matches actual data
+
+**Example Output:**
+```
+Sensor Types:
+  D (Door): 14 sensors
+  E (Energy): 1 sensor
+  I (Item): 6 sensors
+  L (Light): 6 sensors
+  LL (Light Level): 3 sensors
+  LS (Light Switch): 54 sensors
+  M (Motion): 52 sensors
+  MA (Motion Area): 4 sensors
+  P (Power): 2 sensors
+  T (Temperature): 12 sensors
+  system: 1 sensor
+
+Total: 155 sensors
+```
+
+### Dataset Statistics (`scripts/analyze_current_dataset.py`)
+
+Analyzes the filtered dataset to compute activity statistics including segment counts, durations, and event distributions.
+
+**Usage:**
+```bash
+python scripts/analyze_current_dataset.py
+```
+
+**Output:**
+- Number of files and total events
+- Number of segments per activity
+- Average duration per activity
+- Average number of events per segment
+- Activity distribution across dataset
+
+**Example Output:**
+```
+Dataset Statistics:
+  Files: 251
+  Total Events: 74,580
+  Total Segments: 1,005
+
+Activity Statistics:
+  Activity 1 (Pometanje tal): 150 segments, avg duration 45.2s, avg 12.3 events/segment
+  Activity 2 (Jemanje zdravil): 186 segments, avg duration 38.7s, avg 10.1 events/segment
+  Activity 3 (Igre s kartami): 76 segments, avg duration 180.5s, avg 45.2 events/segment
+  [...]
+```
 
 ---
 
@@ -734,6 +805,33 @@ evaluator.plot_dual_roc_curves(
 - **IoU**: Intersection over Union
 - **Frame-Level AUC**: ROC curve at time-unit resolution
 - **Segment-Level AUC**: ROC curve for segment detection
+
+#### Slovene Localization
+
+All visualization outputs (ROC curves and timeline plots) support Slovene translations:
+
+**Activity Names:**
+- 1: Pometanje tal (Sweeping floors)
+- 2: Jemanje zdravil (Taking medicine)
+- 3: Igre s kartami (Playing cards)
+- 4: Predvajanje DVD-ja (Playing DVD)
+- 5: Zalivanje rož (Watering plants)
+- 6: Telefonski klic (Phone call)
+- 7: Kuhanje (Cooking)
+- 8: Izbira oblačil (Choosing clothes)
+
+**ROC Curve Labels:**
+- Titles: "ROC krivulja na nivoju časovne enote" (frame-level), "ROC krivulja na nivoju segmenta" (segment-level)
+- Axes: "FPR" (False Positive Rate), "TPR" (True Positive Rate)
+- Decimal separator: Comma (e.g., "0,85" instead of "0.85")
+
+**Timeline Visualization Labels:**
+- X-axis: "Čas" (Time)
+- Legend: "Dejanski" (Ground Truth), "Napoved" (Prediction)
+- Duration format: "13,5 s" (with space before unit and comma decimal separator)
+- Legend position: Bottom right
+
+These translations are automatically applied when using `plot_dual_roc_curves()` and `visualize_segments_timeline.py`.
 
 ---
 

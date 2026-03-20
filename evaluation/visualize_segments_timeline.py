@@ -6,6 +6,20 @@ from datetime import datetime, timedelta
 from typing import List, Optional, Tuple
 import numpy as np
 from pathlib import Path
+import locale
+
+
+# Activity name mapping
+ACTIVITY_NAMES = {
+    '1': 'Pometanje tal',
+    '2': 'Jemanje zdravil',
+    '3': 'Igre s kartami',
+    '4': 'Predvajanje DVD-ja',
+    '5': 'Zalivanje rož',
+    '6': 'Telefonski klic',
+    '7': 'Kuhanje',
+    '8': 'Izbira oblačil'
+}
 
 
 def visualize_segments_timeline(
@@ -67,9 +81,19 @@ def visualize_segments_timeline(
     else:
         time_start, time_end = time_interval
     
+    # Configure matplotlib for comma decimal separator
+    try:
+        locale.setlocale(locale.LC_NUMERIC, 'sl_SI.UTF-8')
+    except:
+        try:
+            locale.setlocale(locale.LC_NUMERIC, 'Slovenian_Slovenia.1250')
+        except:
+            pass
+    plt.rcParams['axes.formatter.use_locale'] = True
+
     # Create figure - single axis
     fig, ax = plt.subplots(figsize=figsize)
-    
+
     # Color map for segments (Same as ROC - default matplotlib colors)
     custom_colors = {
         '1': '#1f77b4',  # Blue
@@ -82,30 +106,30 @@ def visualize_segments_timeline(
         '8': '#7f7f7f'   # Gray
     }
     color_map = {seg_id: custom_colors.get(seg_id, 'gray') for seg_id in segment_ids}
-    
+
     # Each segment ID gets 2 rows: GT on top, Pred on bottom
     num_rows = len(segment_ids) * 2
-    
+
     # Setup axes
-    ax.set_ylabel('Segment ID', fontsize=12, fontweight='bold')
     ax.set_ylim(-0.5, num_rows - 0.5)
-    
-    # Create y-tick labels showing GT/Pred pairs
+
+    # Create y-tick labels showing GT/Pred pairs with activity names
     yticks = []
     ytick_labels = []
     for i, seg_id in enumerate(segment_ids):
+        activity_name = ACTIVITY_NAMES.get(seg_id, f'Activity {seg_id}')
         # Ground truth row (top of pair)
         yticks.append(i * 2)
-        ytick_labels.append(f'{seg_id} (GT)')
+        ytick_labels.append(f'{activity_name} (Dej.)')
         # Predicted row (bottom of pair)
         yticks.append(i * 2 + 1)
-        ytick_labels.append(f'{seg_id} (P)')
-    
+        ytick_labels.append(f'{activity_name} (Nap.)')
+
     ax.set_yticks(yticks)
     ax.set_yticklabels(ytick_labels, fontsize=9)
     ax.grid(True, alpha=0.3, axis='x')
     ax.set_xlim(time_start, time_end)
-    ax.set_xlabel('Time', fontsize=12, fontweight='bold')
+    ax.set_xlabel('Čas', fontsize=12, fontweight='bold')
     
     # Draw ground truth segments
     for _, row in gt_df.iterrows():
@@ -127,12 +151,13 @@ def visualize_segments_timeline(
             )
             ax.add_patch(rect)
             
-            # Add duration text if segment is wide enough
+            # Add duration text if segment is wide enough (with comma as decimal separator)
             if (end - start).total_seconds() > (time_end - time_start).total_seconds() * 0.05:
                 mid_time = start + (end - start) / 2
-                ax.text(mid_time, y_pos, f'{(end-start).total_seconds():.1f}s',
+                duration_str = f'{(end-start).total_seconds():.1f}'.replace('.', ',') + ' s'
+                ax.text(mid_time, y_pos, duration_str,
                        ha='center', va='center', fontsize=8, fontweight='bold')
-    
+
     # Draw predicted segments
     for _, row in pred_df.iterrows():
         seg_id = row['segment_id']
@@ -141,7 +166,7 @@ def visualize_segments_timeline(
             y_pos = seg_idx * 2 + 1  # Predicted row
             start = row['start_time']
             end = row['end_time']
-            
+
             rect = mpatches.Rectangle(
                 (start, y_pos - 0.4),
                 end - start,
@@ -153,13 +178,14 @@ def visualize_segments_timeline(
                 linestyle='--'
             )
             ax.add_patch(rect)
-            
-            # Add duration text if segment is wide enough
+
+            # Add duration text if segment is wide enough (with comma as decimal separator)
             if (end - start).total_seconds() > (time_end - time_start).total_seconds() * 0.05:
                 mid_time = start + (end - start) / 2
-                ax.text(mid_time, y_pos, f'{(end-start).total_seconds():.1f}s',
+                duration_str = f'{(end-start).total_seconds():.1f}'.replace('.', ',') + ' s'
+                ax.text(mid_time, y_pos, duration_str,
                        ha='center', va='center', fontsize=8, fontweight='bold')
-    
+
     # Format x-axis
     time_range_seconds = (time_end - time_start).total_seconds()
     if time_range_seconds < 120:  # Less than 2 minutes
@@ -179,15 +205,12 @@ def visualize_segments_timeline(
     
     # Add legend
     legend_elements = [
-        mpatches.Patch(facecolor='gray', edgecolor='black', linewidth=2, 
-                      label='Ground Truth', alpha=0.7),
-        mpatches.Patch(facecolor='gray', edgecolor='red', linewidth=2, 
-                      linestyle='--', label='Predicted', alpha=0.7)
+        mpatches.Patch(facecolor='gray', edgecolor='black', linewidth=2,
+                      label='Dejanski segment', alpha=0.7),
+        mpatches.Patch(facecolor='gray', edgecolor='red', linewidth=2,
+                      linestyle='--', label='Napoved', alpha=0.7)
     ]
-    ax.legend(handles=legend_elements, loc='upper right', fontsize=10)
-    
-    # Add title
-    ax.set_title(title, fontsize=14, fontweight='bold', pad=20)
+    ax.legend(handles=legend_elements, loc='lower right', fontsize=10)
     
     plt.tight_layout()
     return fig, ax
@@ -251,9 +274,19 @@ def visualize_segments_combined(
     else:
         time_start, time_end = time_interval
     
+    # Configure matplotlib for comma decimal separator
+    try:
+        locale.setlocale(locale.LC_NUMERIC, 'sl_SI.UTF-8')
+    except:
+        try:
+            locale.setlocale(locale.LC_NUMERIC, 'Slovenian_Slovenia.1250')
+        except:
+            pass
+    plt.rcParams['axes.formatter.use_locale'] = True
+
     # Create figure
     fig, ax = plt.subplots(figsize=figsize)
-    
+
     # Color map (Same as ROC - default matplotlib colors)
     custom_colors = {
         '1': '#1f77b4',  # Blue
@@ -266,15 +299,16 @@ def visualize_segments_combined(
         '8': '#7f7f7f'   # Gray
     }
     color_map = {seg_id: custom_colors.get(seg_id, 'gray') for seg_id in segment_ids}
-    
-    # Setup axes
-    ax.set_ylabel('Segment ID', fontsize=12, fontweight='bold')
+
+    # Setup axes with activity names
     ax.set_ylim(-0.5, len(segment_ids) - 0.5)
     ax.set_yticks(range(len(segment_ids)))
-    ax.set_yticklabels(segment_ids)
+    # Use activity names for y-tick labels
+    activity_labels = [ACTIVITY_NAMES.get(seg_id, seg_id) for seg_id in segment_ids]
+    ax.set_yticklabels(activity_labels)
     ax.grid(True, alpha=0.3, axis='x')
     ax.set_xlim(time_start, time_end)
-    ax.set_xlabel('Time', fontsize=12, fontweight='bold')
+    ax.set_xlabel('Čas', fontsize=12, fontweight='bold')
     
     # Draw ground truth segments (filled, solid border)
     for _, row in gt_df.iterrows():
@@ -336,15 +370,12 @@ def visualize_segments_combined(
     
     # Add legend
     legend_elements = [
-        mpatches.Patch(facecolor='lightgray', edgecolor='black', linewidth=2.5, 
-                      label='Ground Truth', alpha=0.6),
-        mpatches.Patch(facecolor='white', edgecolor='red', linewidth=2.5, 
-                      linestyle='--', label='Predicted', alpha=0.8)
+        mpatches.Patch(facecolor='lightgray', edgecolor='black', linewidth=2.5,
+                      label='Dejanski segment', alpha=0.6),
+        mpatches.Patch(facecolor='white', edgecolor='red', linewidth=2.5,
+                      linestyle='--', label='Napoved', alpha=0.8)
     ]
-    ax.legend(handles=legend_elements, loc='upper right', fontsize=11)
-    
-    # Add title
-    ax.set_title(title, fontsize=14, fontweight='bold', pad=20)
+    ax.legend(handles=legend_elements, loc='lower right', fontsize=11)
     
     plt.tight_layout()
     return fig, ax

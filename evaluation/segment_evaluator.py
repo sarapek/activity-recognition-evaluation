@@ -10,6 +10,21 @@ from itertools import cycle
 class SegmentEvaluator:
     """Evaluates segment-based recognition with both frame-level and segment-level ROC"""
 
+    # Activity name mapping
+    @staticmethod
+    def get_activity_names():
+        """Get activity names in Slovene"""
+        return {
+            '1': 'Pometanje tal',
+            '2': 'Jemanje zdravil',
+            '3': 'Igre s kartami',
+            '4': 'Predvajanje DVD-ja',
+            '5': 'Zalivanje rož',
+            '6': 'Telefonski klic',
+            '7': 'Kuhanje',
+            '8': 'Izbira oblačil'
+        }
+
     # Fixed color mapping for activities 1-8 (Option B - balanced & distinct)
     @staticmethod
     def get_activity_colors():
@@ -167,6 +182,7 @@ class SegmentEvaluator:
         if df is None or len(df) == 0:
             return segments
         
+        # ADD THIS CHECK TOO
         if 'annotation' not in df.columns:
             print(f"Warning: 'annotation' column not found in DataFrame. Columns: {df.columns.tolist()}")
             return segments
@@ -1057,7 +1073,7 @@ class SegmentEvaluator:
             gt_segments = [s for s in gt_segments if s['segment_id'] in activity_filter]
 
         # Adjust predicted segments for start time tolerance (timeline metrics)
-        pred_segments_adjusted = self._adjust_segments_for_tolerance(pred_segments, gt_segments)
+        pred_segments_adjusted = self._adjust_segments_for_tolerance(pred_segments, gt_segments) #DISABLED
 
         # Get timeline bounds
         all_times = []
@@ -1203,52 +1219,72 @@ class SegmentEvaluator:
         Plot both frame-level and segment-level ROC curves side by side
         """
         import matplotlib.pyplot as plt
-        
+        import locale
+
+        # Set locale for comma decimal separator
+        try:
+            locale.setlocale(locale.LC_NUMERIC, 'sl_SI.UTF-8')
+        except:
+            try:
+                locale.setlocale(locale.LC_NUMERIC, 'Slovenian_Slovenia.1250')
+            except:
+                pass  # If locale setting fails, continue with default
+
+        # Configure matplotlib to use comma as decimal separator
+        plt.rcParams['axes.formatter.use_locale'] = True
+
         if 'frame_level' not in results or 'segment_level' not in results:
             print("Both ROC types not available in results")
             return
-        
+
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
-        
+
         # Filter activity classes
         activity_classes = results['metadata']['activity_classes']
         if activity_filter:
             activity_classes = [a for a in activity_classes if a in activity_filter]
-        
-        # Get colors matching timeline
+
+        # Get colors and names
         activity_colors = self.get_activity_colors()
+        activity_names = self.get_activity_names()
 
         # Left: Frame-level ROC
         for activity_id in activity_classes:
-            color = activity_colors.get(activity_id, 'gray')  # Use Set3 color mapping
+            color = activity_colors.get(activity_id, 'gray')
+            activity_name = activity_names.get(activity_id, f"Activity {activity_id}")
             if activity_id in results['frame_level'] and results['frame_level'][activity_id]['auc'] is not None:
                 fpr = results['frame_level'][activity_id]['fpr']
                 tpr = results['frame_level'][activity_id]['tpr']
                 auc_val = results['frame_level'][activity_id]['auc']
-                ax1.plot(fpr, tpr, color=color, lw=2, 
-                        label=f"Activity {activity_id} (AUC={auc_val:.2f})")
-        
+                # Format AUC with comma as decimal separator
+                auc_str = f"{auc_val:.2f}".replace('.', ',')
+                ax1.plot(fpr, tpr, color=color, lw=2,
+                        label=f"{activity_name} (AUC={auc_str})")
+
         ax1.plot([0, 1], [0, 1], 'gray', linestyle='--', alpha=0.5)
-        ax1.set_xlabel('False Positive Rate')
-        ax1.set_ylabel('True Positive Rate')
-        ax1.set_title('Frame-Level ROC (Per-Time-Unit)')
+        ax1.set_xlabel('FPR')
+        ax1.set_ylabel('TPR')
+        ax1.set_title('ROC krivulja na nivoju časovne enote')
         ax1.legend(loc='best', fontsize=8)
         ax1.grid(True, alpha=0.3)
-        
+
         # Right: Segment-level ROC
         for activity_id in activity_classes:
-            color = activity_colors.get(activity_id, 'gray')  # Use Set3 color mapping
+            color = activity_colors.get(activity_id, 'gray')
+            activity_name = activity_names.get(activity_id, f"Activity {activity_id}")
             if activity_id in results['segment_level'] and results['segment_level'][activity_id]['auc'] is not None:
                 fpr = results['segment_level'][activity_id]['fpr']
                 tpr = results['segment_level'][activity_id]['tpr']
                 auc_val = results['segment_level'][activity_id]['auc']
+                # Format AUC with comma as decimal separator
+                auc_str = f"{auc_val:.2f}".replace('.', ',')
                 ax2.plot(fpr, tpr, color=color, lw=2,
-                        label=f"Activity {activity_id} (AUC={auc_val:.2f})")
-        
+                        label=f"{activity_name} (AUC={auc_str})")
+
         ax2.plot([0, 1], [0, 1], 'gray', linestyle='--', alpha=0.5)
-        ax2.set_xlabel('False Positive Rate')
-        ax2.set_ylabel('True Positive Rate')
-        ax2.set_title('Segment-Level ROC (Overlap-Based)')
+        ax2.set_xlabel('FPR')
+        ax2.set_ylabel('TPR')
+        ax2.set_title('ROC krivulja na nivoju segmenta')
         ax2.legend(loc='best', fontsize=8)
         ax2.grid(True, alpha=0.3)
         
@@ -1728,44 +1764,54 @@ class SegmentEvaluator:
         # Plot
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
 
-        # Get colors matching timeline
+        # Configure matplotlib to use comma as decimal separator
+        plt.rcParams['axes.formatter.use_locale'] = True
+
+        # Get colors and names
         activity_colors = self.get_activity_colors()
+        activity_names = self.get_activity_names()
 
         # Frame-level
         for activity_id in activity_filter:
-            color = activity_colors.get(activity_id, 'gray')  # Use Set3 color mapping
+            color = activity_colors.get(activity_id, 'gray')
+            activity_name = activity_names.get(activity_id, f"Activity {activity_id}")
             if activity_id in averaged_frame_roc:
                 fpr = averaged_frame_roc[activity_id]['fpr']
                 tpr = averaged_frame_roc[activity_id]['tpr']
                 mean_auc = averaged_frame_roc[activity_id]['auc']
                 std_auc = averaged_frame_roc[activity_id]['auc_std']
-                
+
+                # Format with comma as decimal separator
+                auc_str = f"{mean_auc:.2f}±{std_auc:.2f}".replace('.', ',')
                 ax1.plot(fpr, tpr, color=color, lw=2,
-                        label=f"Activity {activity_id} (AUC={mean_auc:.2f}±{std_auc:.2f})")
-        
+                        label=f"{activity_name} (AUC={auc_str})")
+
         ax1.plot([0, 1], [0, 1], 'gray', linestyle='--', alpha=0.5)
-        ax1.set_xlabel('False Positive Rate')
-        ax1.set_ylabel('True Positive Rate')
-        ax1.set_title(f'Frame-Level ROC (Averaged Across {len(all_fold_results)} Folds)')
+        ax1.set_xlabel('FPR')
+        ax1.set_ylabel('TPR')
+        ax1.set_title(f'ROC krivulja na nivoju časovne enote (povprečje {len(all_fold_results)} pregibov)')
         ax1.legend(loc='best', fontsize=8)
         ax1.grid(True, alpha=0.3)
-        
+
         # Segment-level
         for activity_id in activity_filter:
-            color = activity_colors.get(activity_id, 'gray')  # Use Set3 color mapping
+            color = activity_colors.get(activity_id, 'gray')
+            activity_name = activity_names.get(activity_id, f"Activity {activity_id}")
             if activity_id in averaged_segment_roc:
                 fpr = averaged_segment_roc[activity_id]['fpr']
                 tpr = averaged_segment_roc[activity_id]['tpr']
                 mean_auc = averaged_segment_roc[activity_id]['auc']
                 std_auc = averaged_segment_roc[activity_id]['auc_std']
-                
+
+                # Format with comma as decimal separator
+                auc_str = f"{mean_auc:.2f}±{std_auc:.2f}".replace('.', ',')
                 ax2.plot(fpr, tpr, color=color, lw=2,
-                        label=f"Activity {activity_id} (AUC={mean_auc:.2f}±{std_auc:.2f})")
+                        label=f"{activity_name} (AUC={auc_str})")
         
         ax2.plot([0, 1], [0, 1], 'gray', linestyle='--', alpha=0.5)
-        ax2.set_xlabel('False Positive Rate')
-        ax2.set_ylabel('True Positive Rate')
-        ax2.set_title(f'Segment-Level ROC (Averaged Across {len(all_fold_results)} Folds)')
+        ax2.set_xlabel('FPR')
+        ax2.set_ylabel('TPR')
+        ax2.set_title(f'ROC krivulja na nivoju segmenta (povprečje {len(all_fold_results)} pregibov)')
         ax2.legend(loc='best', fontsize=8)
         ax2.grid(True, alpha=0.3)
         

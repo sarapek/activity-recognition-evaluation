@@ -24,6 +24,18 @@ def filter_activities(input_file, output_file, keep_activities=[str(i) for i in 
             date, time, sensor, status = words[0], words[1], words[2], words[3]
             annotation = words[4] if len(words) > 4 else None
 
+            # Filter out battery sensors
+            if sensor.startswith('BATP') or sensor.startswith('BATV'):
+                continue
+
+            # Filter out problematic sensors (SS, A sensors, unknown, 023)
+            if sensor.startswith('SS') or sensor.startswith('A') or sensor in ['unknown', '023']:
+                continue
+
+            # Filter out lines with error- in any column (annotation or after)
+            if any('error-' in word.lower() for word in words[4:]):
+                continue
+
             # If there's an annotation, check for start/end markers
             if annotation:
                 # Extract activity number from annotations
